@@ -1,0 +1,188 @@
+# RAGEval — RAG 系统自动化评测工具
+
+基于 LLM-as-Judge 的 RAG 评测工具，参考 [RAGAS](https://github.com/explodinggradients/ragas) 的指标口径，面向「能安全跑长任务、结果可交付」的场景。
+
+## 架构
+
+```mermaid
+flowchart LR
+    D[评测数据集<br/>question / answer / contexts / tags] --> E[EvaluationEngine]
+    E --> M[四指标<br/>LLM-as-Judge]
+    M --> L[LLMClient<br/>限流 / 重试 / 缓存]
+    L --> C[(SQLite 响应缓存)]
+    E --> K[(JSONL 断点)]
+    E --> R[JSON + HTML 报告]
+    E --> T[按标签汇总]
+    CLI[python -m ragas_eval] --> E
+    CMP[compare] --> R
+```
+
+## 功能
+
+- **四个核心指标**：Faithfulness / Answer Relevancy / Context Precision / Context Recall
+- **位置加权精确度**：Context Precision 采用 Average Precision 口径，相关段落排得越靠前得分越高
+- **可靠执行**：`asyncio.Semaphore` 限流、指数退避重试（429/5xx/超时）、60s 超时、JSON 解析失败自动修复一次
+- **断点续跑**：每条样本完成即写入 JSONL，中断后重跑自动跳过已完成样本
+- **响应缓存**：以 `(model, messages, temperature)` 哈希为 key 落盘 SQLite，重复评测不重复计费
+- **失败不污染均值**：任何指标解析失败记 `score=None`，从均值中排除并单独统计失败数
+- **可交付报告**：JSON + 自包含 HTML（雷达图、分数分布、最差样本 Top 10 钻取）
+- **分层评测**：样本可打 `normal` / `boundary` / `adversarial` 标签，报告按层聚合指标，区分常规质量与边界/对抗表现
+- **A/B 对比**：输出两版 RAG 系统的指标差值，以及逐样本胜/平/负
+- **CI 质量门禁**：`--fail-under` 未达标时退出码 1；GitHub Actions 跑离线测试，配置 Key 后额外跑小样本评测回归
+- **成本可观测**：token、调用次数、缓存命中、重试次数、预估费用写入报告
+
+## 快速开始
+
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -r requirements.txt
+cp .env.example .env        # Windows: copy .env.example .env
+# 编辑 .env，至少填写 OPENAI_API_KEY
+```
+
+```bash
+# 跑评测
+python -m ragas_eval run --dataset data/eval_dataset.json --system-version v1
+
+# 只跑部分指标、调高并发
+python -m ragas_eval run --dataset data/eval_dataset.json \
+  --metrics faithfulness,context_recall --max-concurrency 8
+
+# 中断后直接重跑同一条命令，会从断点继续
+```
+
+## CLI
+
+```text
+python -m ragas_eval run --dataset <json> [options]
+  --output-dir results        报告输出目录
+  --metrics a,b              逗号分隔的指标名
+  --max-concurrency 5        同时评测的样本数
+  --threshold 0.6            低分样本阈值
+  --system-version v1        被测 RAG 系统版本（写入报告）
+  --tags normal,adversarial  只评测含指定标签的样本
+  --fail-under 0.5           最低指标均分低于该值时退出码 1（CI 质量门禁）
+  --no-resume                忽略断点，从头评测
+  --no-html                  只输出 JSON
+  --no-cache                 禁用响应缓存
+
+python -m ragas_eval compare results/a.json results/b.json [--json]
+```
+
+## 数据集格式
+
+```json
+[
+  {
+    "question": "用户问题",
+    "answer": "RAG 系统生成的回答",
+    "contexts": ["检索到的上下文片段1", "片段2"],
+    "ground_truth": "标准答案（用于计算召回率）",
+    "tags": ["normal"]
+  }
+]
+```
+
+`tags` 可选，用于分层统计（如 `normal` / `boundary` / `adversarial`）；不写则归入 `untagged`。
+
+`answer` 为空时可用 `python scripts/generate_answers.py --dataset data/eval_dataset.json` 自动生成（会消耗 LLM 额度）。
+
+## 分层评测与 CI
+
+`data/layered_dataset.json` 包含 5 条 `normal`、4 条 `boundary`、4 条 `adversarial` 样本：
+
+- `boundary`：空上下文、超长上下文、制度版本冲突、缺失标准答案
+- `adversarial`：prompt injection、幻觉数字、检索噪声淹没、评分指令注入
+
+```bash
+# 只跑正常层，并启用质量门禁（适合 CI 回归）
+python -m ragas_eval run --dataset data/layered_dataset.json \
+  --tags normal --fail-under 0.5
+```
+
+HTML 报告会按标签聚合指标，最差样本列表带层标签，便于区分「常规回归」与「对抗鲁棒性」。
+
+`.github/workflows/ci.yml`：
+
+- push / PR 在 Python 3.11、3.12 下跑全部离线测试
+- 配置 `OPENAI_API_KEY`（可选 `OPENAI_BASE_URL`、`JUDGE_MODEL`）secret 后，push 额外跑 normal 层小样本评测并上传报告，最低指标均分低于阈值时任务失败
+
+## 指标口径
+
+| 指标 | 计算方式 | 衡量 |
+|---|---|---|
+| Faithfulness | 被上下文支持的 claim 数 / claim 总数 | 生成是否有幻觉 |
+| Answer Relevancy | 由回答反推 3 个问题，与原问题求平均相似度（配置 `EMBEDDING_MODEL` 时用 embedding 余弦，否则由 LLM 批量打分） | 回答是否切题 |
+| Context Precision | `AP = Σ_{k: 相关} (前 k 段命中数 / k) / 相关段数` | 检索排序质量 |
+| Context Recall | 被上下文覆盖的要点数 / 标准答案要点总数 | 检索是否漏信息 |
+
+任何一步解析失败返回 `score=None`，不计入均值；报告里通过 `failed_count` 单独统计。
+
+## 报告
+
+每次运行输出：
+
+- `results/eval_report_<时间戳>.json`：完整明细（含每条样本的指标、理由、原始上下文与元数据）
+- `results/eval_report_<时间戳>.html`：单文件报告，双击即可打开，无需服务器
+- `results/eval_<时间戳>.log`：运行日志
+
+报告元数据包含 `dataset_fingerprint`、`judge_model`、`system_version`、并发数、token/成本等，保证结果可追溯。
+
+## 配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `OPENAI_API_KEY` | 必填 | 任意 OpenAI 兼容接口的 Key |
+| `OPENAI_BASE_URL` | 官方地址 | 如火山 Ark、DeepSeek、Ollama |
+| `JUDGE_MODEL` | `gpt-4o-mini` | 评测模型 |
+| `EMBEDDING_MODEL` | 空 | 配置后相关性改用 embedding 相似度 |
+| `MAX_CONCURRENCY` | `5` | 同时评测的样本数 |
+| `REQUEST_TIMEOUT` | `60` | 单次请求超时（秒） |
+| `MAX_RETRIES` | `3` | 重试次数 |
+| `JSON_MODE` | `1` | 是否请求 `response_format=json_object` |
+| `CACHE_PATH` | `results/cache.sqlite` | 响应缓存位置 |
+| `PRICE_INPUT_PER_1M` | 空 | 输入 token 单价（元/百万） |
+| `PRICE_OUTPUT_PER_1M` | 空 | 输出 token 单价（元/百万） |
+
+## 项目结构
+
+```text
+.github/workflows/ci.yml  # 离线测试 + 可选评测回归
+ragas_eval/
+├── cli.py            # run / compare 命令
+├── config.py         # 环境变量配置，缺失即报错
+├── llm.py            # 缓存、重试、超时、JSON 解析、用量统计
+├── engine.py         # 并发调度、断点续跑、分层汇总
+├── report.py         # 自包含 HTML 报告
+├── compare.py        # A/B 对比
+├── cache.py          # SQLite 响应缓存
+├── dataset.py        # 数据集加载、tags 校验与过滤
+└── metrics/          # 四个指标
+tests/                # pytest，全部离线运行
+data/                 # 示例 / 分层 / 对抗数据集
+results/              # 报告输出
+```
+
+## 测试
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+测试不访问网络：通过注入假 LLM 客户端覆盖 JSON 解析、指标算法、断点续跑、缓存、分层汇总与对比逻辑。
+
+## 局限
+
+- 未实现多次采样取均值与人工金标一致性校准（Kappa / Spearman）
+- 未接入被测 RAG 系统 API，需要预先准备 `question + contexts + answer`
+- LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读
+
+## 安全
+
+API Key 只从环境变量读取；`.env` 已被 `.gitignore` 忽略。**不要把 Key 写进源码或截图。**

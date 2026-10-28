@@ -1,0 +1,11 @@
+# 密钥
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# 运行产物
+results/
