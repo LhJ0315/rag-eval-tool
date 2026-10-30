@@ -43,12 +43,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-      - name: Run layered smoke evaluation (quality gate)
+      - name: Run smoke evaluation (quality gate)
         if: env.OPENAI_API_KEY != ''
         run: |
           python -m ragas_eval run \
-            --dataset data/layered_dataset.json \
+            --dataset data/eval_dataset.json \
             --tags normal \
+            --limit 3 \
             --metrics faithfulness,answer_relevancy \
             --max-concurrency 2 \
             --system-version ci \

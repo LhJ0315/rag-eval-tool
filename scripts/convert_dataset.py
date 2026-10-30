@@ -8,7 +8,7 @@
 3. 自定义 JSON 格式转换
 
 使用方法：
-    python scripts/convert_dataset.py --dataset hotpotqa --output data/eval_dataset.json --num 200
+    python scripts/convert_dataset.py --dataset hotpotqa --output data/hotpotqa_dataset.json --num 200
 """
 import json
 import argparse
@@ -138,7 +138,7 @@ def main():
     parser.add_argument("--dataset", type=str, required=True,
                         choices=["hotpotqa", "ragbench", "local"],
                         help="数据集名称")
-    parser.add_argument("--output", type=str, default="data/eval_dataset.json",
+    parser.add_argument("--output", type=str, default="data/hotpotqa_dataset.json",
                         help="输出文件路径")
     parser.add_argument("--num", type=int, default=200,
                         help="转换样本数量（默认200条）")

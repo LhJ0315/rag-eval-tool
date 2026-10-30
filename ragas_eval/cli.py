@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="只评测包含指定标签的样本，逗号分隔，如 normal,adversarial",
     )
     run.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="只评测过滤后的前 N 条样本，适合 CI 冒烟",
+    )
+    run.add_argument(
         "--fail-under",
         type=float,
         default=None,
@@ -69,13 +75,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _prepare_dataset(dataset: list[dict], tags: str | None, limit: int | None) -> list[dict]:
+    if tags:
+        dataset = filter_by_tags(
+            dataset, [tag for tag in tags.split(",") if tag.strip()]
+        )
+    if limit is not None:
+        if limit <= 0:
+            raise ValueError("--limit 必须为正整数")
+        dataset = dataset[:limit]
+    return dataset
+
+
 async def _evaluate(args, settings: Settings, cache: ResponseCache | None) -> int:
     metrics = [name.strip() for name in args.metrics.split(",") if name.strip()]
-    dataset = load_dataset(args.dataset)
-    if args.tags:
-        dataset = filter_by_tags(
-            dataset, [tag for tag in args.tags.split(",") if tag.strip()]
-        )
+    dataset = _prepare_dataset(load_dataset(args.dataset), args.tags, args.limit)
     engine = EvaluationEngine(
         settings,
         cache=cache,

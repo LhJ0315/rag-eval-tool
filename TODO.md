@@ -1,6 +1,6 @@
 # RAGEval — 进度与待办
 
-> 更新时间：2026-10-28
+> 更新时间：2026-10-30
 
 ## 已完成
 
@@ -20,16 +20,18 @@
 | P2-4 HTML 报告 | 自包含单文件：雷达图、分布、最差样本 Top 10 |
 | P2-5 A/B 对比 | `python -m ragas_eval compare a.json b.json`，输出指标差值与胜/平/负 |
 | P3-1 CLI | `run` / `compare` 两个子命令，不再需要改源码 |
-| P3-2 单元测试 | `pytest` 30 项，全部离线 |
+| P3-2 单元测试 | `pytest` 32 项，全部离线 |
 | P3-3 CI | GitHub Actions：push/PR 跑离线测试；配置 Key secret 后跑 normal 层小样本评测，`--fail-under` 门禁并上传报告 |
 | P3-4 版本元数据 | 报告记录数据集指纹、judge 模型、被测系统版本 |
-| P3-6 分层评测 | 数据集支持 `tags`（normal / boundary / adversarial），报告按层聚合；新增 8 条边界/对抗样本，合并为 `data/layered_dataset.json` |
+| P3-6 分层评测 | 数据集支持难度 + 领域标签，报告按标签聚合；主集扩至 41 条中英双语（25 normal / 8 boundary / 8 adversarial），含边界、注入、配对错答等场景 |
+| P2-6 接入真实 RAG API | `scripts/run_dify_system.py` 按标签路由到 Dify Chat App，采集回答与 `retriever_resources`；已完成 Dify 1.18 + BGE-M3 的 41 条端到端评测 |
 
 ## 待完成
 
 - **P0-1 吊销历史 Key**：源码中的硬编码 Key 已清除，但仍需到火山引擎控制台**吊销已泄露的 Key**（控制台操作，无法在代码里完成）
 - **P1-5 多次采样**：每个指标默认跑 3 次并输出均值与标准差
 - **P1-6 人工金标校准**：抽 20–30 条人工打分，计算 Spearman / Cohen's Kappa
-- **P2-6 接入真实 RAG API**：`RAGClient` 抽象，只给问题列表即可评测
 - **P3-5 本地 judge 验证**：Ollama / vLLM 的 OpenAI 兼容接口已可用，尚未实测
-- **数据集扩充**：主数据集 20 条（HotpotQA），分层集 13 条；目标主数据集扩到 100–200 条并记录版本
+- **检索消融**：hotpotqa 在 top_k=4 下 5/20 拒答，做 top_k=6/8 与 rerank 的对比
+- **数据集去重与对抗改造**：3 组同题 normal/adversarial 配对在系统评测中退化，需去重或把注入文本写入知识库
+- **数据集扩充**：主评测集 41 条（25 normal / 8 boundary / 8 adversarial）；英文侧继续扩到 100–200 条并记录版本

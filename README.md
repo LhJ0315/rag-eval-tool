@@ -26,8 +26,9 @@ flowchart LR
 - **响应缓存**：以 `(model, messages, temperature)` 哈希为 key 落盘 SQLite，重复评测不重复计费
 - **失败不污染均值**：任何指标解析失败记 `score=None`，从均值中排除并单独统计失败数
 - **可交付报告**：JSON + 自包含 HTML（雷达图、分数分布、最差样本 Top 10 钻取）
-- **分层评测**：样本可打 `normal` / `boundary` / `adversarial` 标签，报告按层聚合指标，区分常规质量与边界/对抗表现
+- **分层评测**：样本可打难度标签（`normal` / `boundary` / `adversarial`）与领域标签（`hotpotqa` / `policy`），报告按标签聚合指标，区分常规质量与边界/对抗表现
 - **A/B 对比**：输出两版 RAG 系统的指标差值，以及逐样本胜/平/负
+- **端到端接入**：附带 `scripts/run_dify_system.py`，按样本标签路由到 Dify Chat App，直接采集系统回答与 `retriever_resources` 作为 `answer` / `contexts`
 - **CI 质量门禁**：`--fail-under` 未达标时退出码 1；GitHub Actions 跑离线测试，配置 Key 后额外跑小样本评测回归
 - **成本可观测**：token、调用次数、缓存命中、重试次数、预估费用写入报告
 
@@ -66,6 +67,7 @@ python -m ragas_eval run --dataset <json> [options]
   --threshold 0.6            低分样本阈值
   --system-version v1        被测 RAG 系统版本（写入报告）
   --tags normal,adversarial  只评测含指定标签的样本
+  --limit 3                  只评测过滤后的前 N 条（CI 冒烟）
   --fail-under 0.5           最低指标均分低于该值时退出码 1（CI 质量门禁）
   --no-resume                忽略断点，从头评测
   --no-html                  只输出 JSON
@@ -83,26 +85,29 @@ python -m ragas_eval compare results/a.json results/b.json [--json]
     "answer": "RAG 系统生成的回答",
     "contexts": ["检索到的上下文片段1", "片段2"],
     "ground_truth": "标准答案（用于计算召回率）",
-    "tags": ["normal"]
+    "tags": ["boundary", "policy"],
+    "note": "版本冲突：应按最新版本回答"
   }
 ]
 ```
 
-`tags` 可选，用于分层统计（如 `normal` / `boundary` / `adversarial`）；不写则归入 `untagged`。
+`tags` 可选，可写多个标签：难度标签用 `normal` / `boundary` / `adversarial`，领域标签用 `hotpotqa` / `policy`；报告按每个标签分别聚合（同一条样本会出现在多个分组中），不写则归入 `untagged`。`--tags` 是并集语义，如 `--tags normal,hotpotqa` 会选中所有命中任一标签的样本。
+
+`note` 可选，用于记录该样本的考察点与预期行为，不参与指标计算。
 
 `answer` 为空时可用 `python scripts/generate_answers.py --dataset data/eval_dataset.json` 自动生成（会消耗 LLM 额度）。
 
 ## 分层评测与 CI
 
-`data/layered_dataset.json` 包含 5 条 `normal`、4 条 `boundary`、4 条 `adversarial` 样本：
+`data/eval_dataset.json` 是 41 条中英双语分层评测集：25 条 `normal`（20 条 HotpotQA + 5 条中文制度问答）、8 条 `boundary`、8 条 `adversarial`。
 
-- `boundary`：空上下文、超长上下文、制度版本冲突、缺失标准答案
-- `adversarial`：prompt injection、幻觉数字、检索噪声淹没、评分指令注入
+- `boundary`：零上下文拒答、超长安全制度、制度版本冲突、条件型奖金、年假年限临界、加班时长取整、福利适用范围、年假跨年例外
+- `adversarial`：上下文注入、幻觉数字、检索噪声淹没、评分指令注入、配对错答（同题同上下文、仅替换错误答案）、捏造条款
 
 ```bash
-# 只跑正常层，并启用质量门禁（适合 CI 回归）
-python -m ragas_eval run --dataset data/layered_dataset.json \
-  --tags normal --fail-under 0.5
+# 只跑正常层的前 3 条，并启用质量门禁（适合 CI 回归）
+python -m ragas_eval run --dataset data/eval_dataset.json \
+  --tags normal --limit 3 --fail-under 0.5
 ```
 
 HTML 报告会按标签聚合指标，最差样本列表带层标签，便于区分「常规回归」与「对抗鲁棒性」。
@@ -110,7 +115,38 @@ HTML 报告会按标签聚合指标，最差样本列表带层标签，便于区
 `.github/workflows/ci.yml`：
 
 - push / PR 在 Python 3.11、3.12 下跑全部离线测试
-- 配置 `OPENAI_API_KEY`（可选 `OPENAI_BASE_URL`、`JUDGE_MODEL`）secret 后，push 额外跑 normal 层小样本评测并上传报告，最低指标均分低于阈值时任务失败
+- 配置 `OPENAI_API_KEY`（可选 `OPENAI_BASE_URL`、`JUDGE_MODEL`）secret 后，push 额外跑 normal 层前 3 条样本的评测并上传报告，最低指标均分低于阈值时任务失败
+
+## 端到端系统评测（Dify）
+
+`scripts/run_dify_system.py` 把真实 RAG 系统的输出变成评测数据集：按样本标签路由到对应 Dify Chat App，采集 `answer` 与 `retriever_resources` 作为 `contexts`。
+
+```bash
+# 1. 生成系统输出（41/41，调用失败会记录并单独报告）
+python scripts/run_dify_system.py --dataset data/eval_dataset.json \
+  --output data/system_dify_v1.json --apps-file /path/to/dify-apps.json
+
+# 2. 对系统输出跑四指标
+python -m ragas_eval run --dataset data/system_dify_v1.json \
+  --system-version dify-1.18.0-bge-m3-top4 --output-dir results/system_dify_v1
+```
+
+`--apps-file` 放在仓库外，内容为 `{"base_url": "http://localhost:8080", "apps": {"policy": {"api_key": "...", "app_id": "..."}, "hotpotqa": {...}}}`，API Key 不进版本库。
+
+实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、`top_k=4`、无 rerank；每个领域一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。
+
+同一 judge（`deepseek-v4-pro-0813`）重判后的对比：
+
+| 指标 | 数据集参考答（oracle 基线） | Dify 系统 | 差值 |
+|---|---|---|---|
+| Faithfulness | 0.867 | 0.902 | +0.035 |
+| Answer Relevancy | 0.506 | 0.654 | +0.148 |
+| Context Precision | 0.609 | 0.807 | +0.198 |
+| Context Recall | 0.870 | 0.817 | -0.053 |
+
+- 系统答案更短、更贴上下文，相关性与精确度高于 oracle 基线；召回略低。
+- hotpotqa 的瓶颈在检索而非生成：20 题中 5 题因未同时召回两跳证据而拒答（拒答组 Context Precision 0.05、Faithfulness 0.2），答出的 15 题 Faithfulness 1.0、Context Precision 0.922。
+- 检索诊断见 `results/system_dify_v1/retrieval_diagnostic.json`：top_k=4 时 39/41 至少召回一段参考证据，但多跳题从未覆盖全部证据，下一步做 top_k=6/8 消融。
 
 ## 指标口径
 
@@ -163,8 +199,12 @@ ragas_eval/
 ├── cache.py          # SQLite 响应缓存
 ├── dataset.py        # 数据集加载、tags 校验与过滤
 └── metrics/          # 四个指标
+scripts/
+├── convert_dataset.py    # 外部数据转评测集
+├── generate_answers.py   # 用单个 LLM 补答案
+└── run_dify_system.py    # 从 Dify Chat App 采集系统回答与检索上下文
 tests/                # pytest，全部离线运行
-data/                 # 示例 / 分层 / 对抗数据集
+data/                 # 41 条中英双语分层评测集
 results/              # 报告输出
 ```
 
@@ -180,8 +220,9 @@ python -m pytest -q
 ## 局限
 
 - 未实现多次采样取均值与人工金标一致性校准（Kappa / Spearman）
-- 未接入被测 RAG 系统 API，需要预先准备 `question + contexts + answer`
-- LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读
+- 端到端运行器目前只适配 Dify Chat API；接入其他系统需按同样接口准备 `question + contexts + answer`
+- LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读；更换 judge 后应重判基线再比较
+- 当前主集有 3 组同题 normal/adversarial 配对，接入真实系统后对抗组退化为重复样本，A/B 统计按 38 个不同问题配对
 
 ## 安全
 

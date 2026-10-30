@@ -9,3 +9,9 @@ __pycache__/
 
 # 运行产物
 results/
+
+# 转换脚本输出（主评测集是 data/eval_dataset.json）
+data/hotpotqa_dataset.json
+
+# 端到端运行器输出（由 scripts/run_dify_system.py 生成）
+data/system_*.json

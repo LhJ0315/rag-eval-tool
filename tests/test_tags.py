@@ -2,6 +2,7 @@
 import asyncio
 import json
 
+from ragas_eval.cli import _prepare_dataset
 from ragas_eval.config import Settings
 from ragas_eval.dataset import filter_by_tags, load_dataset
 from ragas_eval.engine import EvaluationEngine, quality_gate
@@ -61,6 +62,24 @@ def test_filter_by_tags():
         assert "标签" in str(exc)
     else:
         raise AssertionError("无匹配标签时应报错")
+
+
+def test_prepare_dataset_applies_tags_then_limit():
+    dataset = [
+        {"question": f"q{i}", "tags": ["normal"] if i < 4 else ["adversarial"]}
+        for i in range(6)
+    ]
+    assert len(_prepare_dataset(dataset, "normal", 3)) == 3
+    assert [item["question"] for item in _prepare_dataset(dataset, "adversarial", 1)] == [
+        "q4"
+    ]
+    assert len(_prepare_dataset(dataset, None, None)) == 6
+    try:
+        _prepare_dataset(dataset, None, 0)
+    except ValueError as exc:
+        assert "limit" in str(exc)
+    else:
+        raise AssertionError("limit 非正数应报错")
 
 
 def _engine(metric=None, checkpoint_dir=".unused"):
