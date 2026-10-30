@@ -44,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"逗号分隔的指标名，可选：{', '.join(METRIC_CLASSES)}",
     )
     run.add_argument("--max-concurrency", type=int, default=None, help="并发样本数")
+    run.add_argument(
+        "--samples",
+        type=int,
+        default=None,
+        help="每个指标重复采样次数（默认读 SAMPLES，1 为单次；稳定性分析建议 3）",
+    )
     run.add_argument("--threshold", type=float, default=0.6, help="低分样本阈值")
     run.add_argument("--system-version", default=None, help="被测 RAG 系统版本号")
     run.add_argument(
@@ -95,6 +101,7 @@ async def _evaluate(args, settings: Settings, cache: ResponseCache | None) -> in
         cache=cache,
         metrics=metrics,
         max_concurrency=args.max_concurrency,
+        samples=args.samples,
     )
     try:
         report = await engine.evaluate_dataset(

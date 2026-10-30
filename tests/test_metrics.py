@@ -88,3 +88,23 @@ def test_context_recall_scores_coverage():
 def test_context_recall_without_ground_truth_returns_none():
     result = asyncio.run(ContextRecall(FakeLLM()).score("q", "a", ["ctx"], ""))
     assert result["score"] is None
+
+
+def test_faithfulness_passes_temperature_to_llm():
+    llm = FakeLLM(
+        json_responses=[
+            ({"claims": ["c1"]}, ""),
+            ({"supported": [True]}, ""),
+        ]
+    )
+    result = asyncio.run(
+        Faithfulness(llm).score("q", "a", ["ctx"], temperature=0.7)
+    )
+    assert result["score"] == 1.0
+    assert llm.json_temperatures == [0.7, 0.7]
+
+
+def test_context_precision_passes_temperature_to_llm():
+    llm = FakeLLM(chat_responses=["Relevant"])
+    asyncio.run(ContextPrecision(llm).score("q", "a", ["c1"], temperature=0.7))
+    assert llm.chat_temperatures == [0.7]

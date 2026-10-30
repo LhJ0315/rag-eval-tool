@@ -17,6 +17,8 @@ class AnswerRelevancy(BaseMetric):
         answer: str,
         contexts: list[str],
         ground_truth: str | None = None,
+        *,
+        temperature: float = 0.0,
     ) -> dict:
         reverse_prompt = f"""根据以下回答，推测用户可能提出的 3 个问题。
 
@@ -25,7 +27,7 @@ class AnswerRelevancy(BaseMetric):
 
 请输出 JSON 对象，格式：{{"questions": ["问题1", "问题2", "问题3"]}}。
 只输出 JSON，不要输出解释。"""
-        data, raw = await self._call_llm_json(reverse_prompt)
+        data, raw = await self._call_llm_json(reverse_prompt, temperature=temperature)
         questions = data.get("questions") if isinstance(data, dict) else None
         if not isinstance(questions, list) or not questions:
             return self.failure("反推问题解析失败", raw=raw[:500])
@@ -41,9 +43,9 @@ class AnswerRelevancy(BaseMetric):
                 method = "embedding"
             except Exception as exc:  # embedding 接口不可用时回退到 LLM 判定
                 logger.warning("embedding 相似度计算失败，回退 LLM 判定：%s", exc)
-                similarities = await self._llm_similarities(question, questions)
+                similarities = await self._llm_similarities(question, questions, temperature)
         else:
-            similarities = await self._llm_similarities(question, questions)
+            similarities = await self._llm_similarities(question, questions, temperature)
 
         if similarities is None:
             return self.failure("相似度判定解析失败", generated_questions=questions)
@@ -61,7 +63,7 @@ class AnswerRelevancy(BaseMetric):
         }
 
     async def _llm_similarities(
-        self, question: str, questions: list[str]
+        self, question: str, questions: list[str], temperature: float = 0.0
     ) -> list[float] | None:
         listing = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(questions))
         prompt = f"""请判断下列每个反推问题与原始问题的语义相似度。
@@ -73,7 +75,7 @@ class AnswerRelevancy(BaseMetric):
 请逐个给出 0 到 1 之间的分数（1 表示语义完全一致，0 表示完全无关）。
 输出 JSON 对象，格式：{{"similarities": [0.9, 0.6, 0.3]}}，数组长度必须为 {len(questions)}。
 只输出 JSON，不要输出解释。"""
-        data, _ = await self._call_llm_json(prompt)
+        data, _ = await self._call_llm_json(prompt, temperature=temperature)
         values = data.get("similarities") if isinstance(data, dict) else None
         if not isinstance(values, list) or len(values) != len(questions):
             return None

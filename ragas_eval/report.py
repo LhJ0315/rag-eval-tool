@@ -33,11 +33,13 @@ def render_html(report: dict) -> str:
     )
     usage = metadata.get("usage", {})
     cost = usage.get("estimated_cost")
+    runs = (metadata.get("sampling") or {}).get("runs_per_metric", 1)
 
     meta_bits = [
         f"评测时间 {html.escape(str(metadata.get('timestamp', '')))}",
         f"Judge 模型 {html.escape(str(metadata.get('judge_model', '')))}",
         f"样本 {metadata.get('samples', 0)} 条（续跑 {metadata.get('resumed_samples', 0)}）",
+        f"每条采样 {runs} 次",
         f"并发 {metadata.get('max_concurrency', '')}",
         f"耗时 {metadata.get('duration_seconds', '')}s",
         f"数据集指纹 {html.escape(str(metadata.get('dataset_fingerprint', '')))}",
@@ -170,9 +172,21 @@ def _render_card(name: str, data: dict) -> str:
             f'<div class="metric"><span class="name">{html.escape(METRIC_LABELS.get(name, name))}</span>'
             f'<span class="score" style="color:#9ca3af">N/A</span></div>'
         )
+    sampling = ""
+    if data.get("sampling_std") is not None:
+        sampling = f" · 采样σ {data['sampling_std']}"
+        if data.get("sampling_std_samples") is not None:
+            sampling += f"（{data['sampling_std_samples']} 条可估）"
+    if data.get("partial_failures"):
+        sampling += (
+            f" · 采样缺次 {data['partial_failures']} 条"
+            f"/{data.get('failed_draws', '?')} 次"
+        )
     sub = (
         f"min {data.get('min_score')} · max {data.get('max_score')} · "
-        f"std {data.get('std_dev')} · 有效 {data.get('sample_count')} · 失败 {data.get('failed_count')}"
+        f"std {data.get('std_dev')}"
+        + sampling
+        + f" · 有效 {data.get('sample_count')} · 失败 {data.get('failed_count')}"
     )
     return (
         f'<div class="metric"><div><div class="name">{html.escape(METRIC_LABELS.get(name, name))}</div>'

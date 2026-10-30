@@ -121,7 +121,9 @@ class LLMClient:
         messages.append({"role": "user", "content": prompt})
 
         key = self._cache_key(messages, json_mode, temperature)
-        if self.cache is not None:
+        # 采样温度下不落缓存，否则重复采样会命中同一响应，方差失真
+        use_cache = self.cache is not None and temperature == 0.0
+        if use_cache:
             cached = self.cache.get(key)
             if cached is not None:
                 self.stats.cache_hits += 1
@@ -134,13 +136,15 @@ class LLMClient:
             self.stats.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
             self.stats.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
         self.stats.calls += 1
-        if self.cache is not None:
+        if use_cache:
             self.cache.set(key, self.settings.model, text)
         return text
 
-    async def chat_json(self, prompt: str, system: str | None = None):
+    async def chat_json(
+        self, prompt: str, system: str | None = None, temperature: float = 0.0
+    ):
         """返回 (解析后的对象, 原始文本)；解析失败时对象为 None。"""
-        raw = await self.chat(prompt, system=system, json_mode=True)
+        raw = await self.chat(prompt, system=system, json_mode=True, temperature=temperature)
         data = parse_json(raw)
         if data is None:
             repair = (
@@ -148,7 +152,7 @@ class LLMClient:
                 "只输出一个合法 JSON 对象，不要输出解释或 Markdown 代码块。\n\n"
                 + prompt
             )
-            raw = await self.chat(repair, system=system, json_mode=True)
+            raw = await self.chat(repair, system=system, json_mode=True, temperature=temperature)
             data = parse_json(raw)
         if data is None:
             self.stats.failures += 1

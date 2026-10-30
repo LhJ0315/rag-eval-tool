@@ -11,11 +11,15 @@ class BaseMetric(ABC):
     def __init__(self, llm: LLMClient):
         self.llm = llm
 
-    async def _call_llm(self, prompt: str, system: str | None = None) -> str:
-        return await self.llm.chat(prompt, system=system)
+    async def _call_llm(
+        self, prompt: str, system: str | None = None, temperature: float = 0.0
+    ) -> str:
+        return await self.llm.chat(prompt, system=system, temperature=temperature)
 
-    async def _call_llm_json(self, prompt: str, system: str | None = None):
-        return await self.llm.chat_json(prompt, system=system)
+    async def _call_llm_json(
+        self, prompt: str, system: str | None = None, temperature: float = 0.0
+    ):
+        return await self.llm.chat_json(prompt, system=system, temperature=temperature)
 
     @staticmethod
     def failure(reason: str, **extra) -> dict:

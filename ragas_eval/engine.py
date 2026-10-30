@@ -75,6 +75,7 @@ class EvaluationEngine:
         metrics: dict | list[str] | None = None,
         cache: ResponseCache | None = None,
         max_concurrency: int | None = None,
+        samples: int | None = None,
         checkpoint_dir: str | Path = "results/.in_progress",
     ):
         if settings is not None:
@@ -87,6 +88,9 @@ class EvaluationEngine:
         self.client = client or LLMClient(self.settings, cache=cache)
         self.metrics = self._build_metrics(metrics)
         self.max_concurrency = max_concurrency or self.settings.max_concurrency
+        self.samples = samples if samples is not None else self.settings.samples
+        if self.samples < 1:
+            raise ValueError("samples 必须 >= 1")
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.checkpoint_dir = Path(checkpoint_dir)
 
@@ -99,19 +103,80 @@ class EvaluationEngine:
             raise ValueError(f"未知指标：{unknown}，可选：{list(METRIC_CLASSES)}")
         return {name: METRIC_CLASSES[name](self.client) for name in names}
 
+    def _sample_temperatures(self) -> list[float]:
+        """第 1 次保持与历史单次口径一致的 temperature=0，其余用采样温度。"""
+        if self.samples == 1:
+            return [0.0]
+        return [0.0] + [self.settings.sample_temperature] * (self.samples - 1)
+
+    def _aggregate_samples(self, attempts: list[dict]) -> dict:
+        if len(attempts) == 1:
+            return attempts[0]
+
+        sample_scores = []
+        numeric = []
+        base = None
+        for attempt in attempts:
+            score = attempt.get("score")
+            valid = isinstance(score, (int, float)) and not isinstance(score, bool)
+            sample_scores.append(round(float(score), 3) if valid else None)
+            if valid:
+                numeric.append(float(score))
+                if base is None:
+                    base = attempt
+
+        if not numeric:
+            reasons = "；".join(str(item.get("reason", "未知错误")) for item in attempts)
+            return {
+                "score": None,
+                "reason": f"{len(attempts)} 次采样全部失败：{reasons}"[:500],
+                "sample_scores": sample_scores,
+                "score_std": None,
+                "samples_ok": 0,
+                "samples_failed": len(attempts),
+            }
+
+        mean = statistics.fmean(numeric)
+        std = statistics.pstdev(numeric) if len(numeric) > 1 else None
+        std_text = (
+            f"σ {std:.3f}" if std is not None else "仅 1 次有效，无法估计 σ"
+        )
+        aggregated = dict(base)
+        aggregated.update(
+            {
+                "score": round(mean, 3),
+                "sample_scores": sample_scores,
+                "score_std": round(std, 3) if std is not None else None,
+                "samples_ok": len(numeric),
+                "samples_failed": len(attempts) - len(numeric),
+                "reason": (
+                    f"{base.get('reason', '')}"
+                    f"（{len(numeric)}/{len(attempts)} 次采样成功，均值 {mean:.3f}，{std_text}）"
+                ),
+            }
+        )
+        return aggregated
+
     async def evaluate_single(self, sample: dict) -> dict:
         results = {}
+        temperatures = self._sample_temperatures()
         for name, metric in self.metrics.items():
-            try:
-                results[name] = await metric.score(
-                    sample["question"],
-                    sample["answer"],
-                    sample["contexts"],
-                    sample.get("ground_truth", ""),
-                )
-            except Exception as exc:  # 单个指标异常不影响其他指标
-                logger.warning("指标 %s 评测异常：%s", name, exc)
-                results[name] = {"score": None, "reason": f"评测异常: {exc}"}
+            attempts = []
+            for index, temperature in enumerate(temperatures, start=1):
+                try:
+                    attempts.append(
+                        await metric.score(
+                            sample["question"],
+                            sample["answer"],
+                            sample["contexts"],
+                            sample.get("ground_truth", ""),
+                            temperature=temperature,
+                        )
+                    )
+                except Exception as exc:  # 单次采样异常不影响其他次
+                    logger.warning("指标 %s 第 %d 次采样异常：%s", name, index, exc)
+                    attempts.append({"score": None, "reason": f"评测异常: {exc}"})
+            results[name] = self._aggregate_samples(attempts)
 
         return {
             "question": sample["question"],
@@ -141,7 +206,10 @@ class EvaluationEngine:
         checkpoint_dir = Path(checkpoint_dir or self.checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         fingerprint = dataset_fingerprint(dataset)
-        checkpoint_path = checkpoint_dir / f"{fingerprint}.jsonl"
+        checkpoint_name = (
+            f"{fingerprint}.jsonl" if self.samples == 1 else f"{fingerprint}_s{self.samples}.jsonl"
+        )
+        checkpoint_path = checkpoint_dir / checkpoint_name
 
         current_ids = {sample_id(sample) for sample in dataset}
         completed = {}
@@ -208,6 +276,10 @@ class EvaluationEngine:
             "resumed_samples": len(completed),
             "metrics": list(self.metrics),
             "max_concurrency": self.max_concurrency,
+            "sampling": {
+                "runs_per_metric": self.samples,
+                "temperatures": self._sample_temperatures(),
+            },
             "tag_distribution": dict(
                 Counter(
                     tag
@@ -284,10 +356,23 @@ class EvaluationEngine:
         summary = {}
         for metric in self.metrics:
             scores = []
+            per_sample_stds = []
+            partial_failures = 0
+            failed_draws = 0
             for result in results:
-                score = result.get("metrics", {}).get(metric, {}).get("score")
+                cell = result.get("metrics", {}).get(metric, {})
+                score = cell.get("score")
                 if isinstance(score, (int, float)) and not isinstance(score, bool):
                     scores.append(float(score))
+                    std = cell.get("score_std")
+                    if isinstance(std, (int, float)) and not isinstance(std, bool):
+                        per_sample_stds.append(float(std))
+                ok = cell.get("samples_ok")
+                failed = cell.get("samples_failed")
+                if isinstance(failed, int) and failed > 0:
+                    failed_draws += failed
+                    if isinstance(ok, int) and ok > 0:
+                        partial_failures += 1
             if scores:
                 summary[metric] = {
                     "avg_score": round(statistics.fmean(scores), 3),
@@ -303,6 +388,19 @@ class EvaluationEngine:
                     "sample_count": 0,
                     "failed_count": len(results),
                 }
+            if self.samples > 1:
+                summary[metric].update(
+                    {
+                        "sampling_std": (
+                            round(statistics.fmean(per_sample_stds), 3)
+                            if per_sample_stds
+                            else None
+                        ),
+                        "sampling_std_samples": len(per_sample_stds),
+                        "partial_failures": partial_failures,
+                        "failed_draws": failed_draws,
+                    }
+                )
         return summary
 
     def _calculate_tag_summary(self, results: list[dict]) -> dict:
@@ -344,11 +442,20 @@ class EvaluationEngine:
     def _log_summary(self, summary: dict) -> None:
         logger.info("=" * 60)
         for metric, data in summary.items():
+            sampling = ""
+            if data.get("sampling_std") is not None:
+                sampling = (
+                    f" 采样σ={data['sampling_std']}"
+                    f"/{data.get('sampling_std_samples', '?')}条"
+                )
+            if data.get("failed_draws"):
+                sampling += f" 采样缺次={data['failed_draws']}"
             logger.info(
-                "%-20s avg=%s std=%s (样本 %d，失败 %d)",
+                "%-20s avg=%s std=%s%s (样本 %d，失败 %d)",
                 metric,
                 data.get("avg_score", "N/A"),
                 data.get("std_dev", "N/A"),
+                sampling,
                 data.get("sample_count", 0),
                 data.get("failed_count", 0),
             )

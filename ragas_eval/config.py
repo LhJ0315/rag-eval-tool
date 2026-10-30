@@ -67,6 +67,8 @@ class Settings:
     cache_path: str = "results/cache.sqlite"
     price_input_per_1m: float | None = None
     price_output_per_1m: float | None = None
+    samples: int = 1
+    sample_temperature: float = 0.7
 
     def __post_init__(self) -> None:
         if not self.api_key:
@@ -77,6 +79,10 @@ class Settings:
             raise ConfigError("max_retries 必须 >= 1")
         if self.request_timeout <= 0:
             raise ConfigError("request_timeout 必须 > 0")
+        if self.samples < 1:
+            raise ConfigError("samples 必须 >= 1")
+        if not 0.0 <= self.sample_temperature <= 2.0:
+            raise ConfigError("sample_temperature 必须在 0 到 2 之间")
 
     @classmethod
     def from_env(cls, env_file: str = ".env") -> "Settings":
@@ -98,4 +104,6 @@ class Settings:
             cache_path=os.getenv("CACHE_PATH") or "results/cache.sqlite",
             price_input_per_1m=_as_float("PRICE_INPUT_PER_1M", None),
             price_output_per_1m=_as_float("PRICE_OUTPUT_PER_1M", None),
+            samples=_as_int("SAMPLES", 1),
+            sample_temperature=_as_float("SAMPLE_TEMPERATURE", 0.7),
         )

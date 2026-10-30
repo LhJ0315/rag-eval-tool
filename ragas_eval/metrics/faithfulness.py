@@ -12,6 +12,8 @@ class Faithfulness(BaseMetric):
         answer: str,
         contexts: list[str],
         ground_truth: str | None = None,
+        *,
+        temperature: float = 0.0,
     ) -> dict:
         context_text = "\n\n".join(contexts)
 
@@ -22,7 +24,7 @@ class Faithfulness(BaseMetric):
 
 请输出 JSON 对象，格式：{{"claims": ["陈述1", "陈述2"]}}。
 只输出 JSON，不要输出解释。"""
-        data, raw = await self._call_llm_json(extract_prompt)
+        data, raw = await self._call_llm_json(extract_prompt, temperature=temperature)
         claims = data.get("claims") if isinstance(data, dict) else None
         if not isinstance(claims, list):
             return self.failure("陈述提取结果不是合法 JSON", raw=raw[:500])
@@ -43,7 +45,7 @@ class Faithfulness(BaseMetric):
 请输出 JSON 对象，格式：{{"supported": [true, false, ...]}}。
 数组长度必须为 {len(claims)}，顺序与陈述编号一致；true 表示被上下文支持，false 表示不被支持或属于编造。
 只输出 JSON，不要输出解释。"""
-        verdict, raw = await self._call_llm_json(verify_prompt)
+        verdict, raw = await self._call_llm_json(verify_prompt, temperature=temperature)
         supported = verdict.get("supported") if isinstance(verdict, dict) else None
         if not isinstance(supported, list) or len(supported) != len(claims):
             return self.failure(

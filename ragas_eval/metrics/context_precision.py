@@ -17,6 +17,8 @@ class ContextPrecision(BaseMetric):
         answer: str,
         contexts: list[str],
         ground_truth: str | None = None,
+        *,
+        temperature: float = 0.0,
     ) -> dict:
         if not contexts:
             return self.failure("没有检索到上下文，无法计算精确度")
@@ -35,7 +37,7 @@ class ContextPrecision(BaseMetric):
 - Irrelevant：该上下文与问题无关，不包含有用信息
 
 请只输出 Relevant 或 Irrelevant，不要解释。"""
-            result = await self._call_llm(prompt)
+            result = await self._call_llm(prompt, temperature=temperature)
             normalized = result.strip().lower()
             if normalized.startswith("irrelevant"):
                 is_relevant = False

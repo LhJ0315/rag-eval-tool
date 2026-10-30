@@ -23,8 +23,9 @@ flowchart LR
 - **位置加权精确度**：Context Precision 采用 Average Precision 口径，相关段落排得越靠前得分越高
 - **可靠执行**：`asyncio.Semaphore` 限流、指数退避重试（429/5xx/超时）、60s 超时、JSON 解析失败自动修复一次
 - **断点续跑**：每条样本完成即写入 JSONL，中断后重跑自动跳过已完成样本
-- **响应缓存**：以 `(model, messages, temperature)` 哈希为 key 落盘 SQLite，重复评测不重复计费
+- **响应缓存**：以 `(model, messages, temperature)` 哈希为 key 落盘 SQLite，重复评测不重复计费；非 0 温度的采样请求不落缓存，避免多次采样命中同一响应
 - **失败不污染均值**：任何指标解析失败记 `score=None`，从均值中排除并单独统计失败数
+- **多次采样**：`--samples N` 让每个指标重复评测 N 次，首轮 T=0、其余按 `SAMPLE_TEMPERATURE` 采样，输出样本级均值/σ 与指标级 `sampling_std`
 - **可交付报告**：JSON + 自包含 HTML（雷达图、分数分布、最差样本 Top 10 钻取）
 - **分层评测**：样本可打难度标签（`normal` / `boundary` / `adversarial`）与领域标签（`hotpotqa` / `policy`），报告按标签聚合指标，区分常规质量与边界/对抗表现
 - **A/B 对比**：输出两版 RAG 系统的指标差值，以及逐样本胜/平/负
@@ -64,6 +65,7 @@ python -m ragas_eval run --dataset <json> [options]
   --output-dir results        报告输出目录
   --metrics a,b              逗号分隔的指标名
   --max-concurrency 5        同时评测的样本数
+  --samples 1                每个指标重复采样次数（3 适合稳定性分析）
   --threshold 0.6            低分样本阈值
   --system-version v1        被测 RAG 系统版本（写入报告）
   --tags normal,adversarial  只评测含指定标签的样本
@@ -191,6 +193,39 @@ policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升
 
 任何一步解析失败返回 `score=None`，不计入均值；报告里通过 `failed_count` 单独统计。
 
+## 多次采样与稳定性
+
+单次 judge 调用带采样随机性，边界样本的分数可能跳动。`--samples N` 让每个指标对同一条样本重复评测 N 次：
+
+- 第 1 次使用 `temperature=0`，与历史单次口径一致；其余 N-1 次使用 `SAMPLE_TEMPERATURE`（默认 `0.7`）
+- 样本分数取 N 次均值，样本级离散度写入 `score_std`；指标汇总追加 `sampling_std`（各样本 σ 的均值）
+- `σ` 为总体标准差（除以 N），不是样本标准差（N-1）；`sample_scores` 保留 3 位小数用于展示，均值与 σ 由原始分数计算
+- 某次采样调用失败时，均值只用成功次数；只有 1 次有效时 `score_std` 记 `None`（不按 0 处理），汇总额外记录 `sampling_std_samples`、`partial_failures` 与 `failed_draws`
+- 非 0 温度请求不读写响应缓存：否则第 3 次采样会命中第 2 次的缓存，σ 恒为 0。代价是 `--samples 3` 的实际消耗约为单次的 2–3 倍
+- 默认 `samples=1`，与本文档已发布的单次评测数字保持同口径；需要稳定性结论时显式开启
+- 断点文件带 `_sN` 后缀，避免与单次评测混用；报告元数据的 `sampling` 字段记录次数与温度序列
+
+```bash
+python -m ragas_eval run --dataset data/system_dify_v1.json \
+  --samples 3 --system-version dify-1.18.0-bge-m3-top4-s3
+```
+
+### 实测：hotpotqa 20 条 × 3 次
+
+2026-10-31 在 Dify 系统（k=4）的 hotpotqa 子集上跑 3 次采样。该表是 20 条子集结果，不可与上面 41 条全量数字直接比较：
+
+| 指标 | 单次（T=0） | 3 次均值 | 差值 | `sampling_std` | 可估样本 |
+|---|---|---|---|---|---|
+| Faithfulness | 0.780 | 0.813 | +0.033 | 0.050 | 19/20 |
+| Answer Relevancy | 0.513 | 0.503 | -0.010 | 0.055 | 19/20 |
+| Context Precision | 0.729 | 0.749 | +0.020 | 0.037 | 20/20 |
+| Context Recall | 0.925 | 0.925 | 0.000 | 0.000 | 20/20 |
+
+- 首轮 T=0 的分数与历史单次报告 80/80 个单元一致，保证新旧数字可比；第 2/3 次有 13/80 个单元结果不同，确认非 0 温度采样没有被缓存复用
+- 78 个可估单元中 18 个 σ>0，最大 σ 0.471：部分边界样本在 0 与 1 之间跳变，单次分数不足以代表其稳定水平
+- 本次运行有 5 个单元、共 7 次采样因超时或服务端 500 缺次；其中 2 个单元仅 1 次有效，σ 记 N/A 且不参与 `sampling_std`。失败只影响该次采样，不改变已有分数。该次报告在修复 σ 口径后由原始采样分数重算汇总，未重新判分
+- 该验证消耗 322k judge tokens（339 次调用、175 次缓存命中），耗时约 28 分钟；3 次均值相对单次的变化在 ±0.033 内，引用时需注明口径
+
 ## 报告
 
 每次运行输出：
@@ -199,7 +234,7 @@ policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升
 - `results/eval_report_<时间戳>.html`：单文件报告，双击即可打开，无需服务器
 - `results/eval_<时间戳>.log`：运行日志
 
-报告元数据包含 `dataset_fingerprint`、`judge_model`、`system_version`、并发数、token/成本等，保证结果可追溯。
+报告元数据包含 `dataset_fingerprint`、`judge_model`、`system_version`、并发数、token/成本等，保证结果可追溯；开启多次采样时另有 `sampling`（次数与温度）与指标级 `sampling_std`。
 
 ## 配置
 
@@ -210,6 +245,8 @@ policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升
 | `JUDGE_MODEL` | `gpt-4o-mini` | 评测模型 |
 | `EMBEDDING_MODEL` | 空 | 配置后相关性改用 embedding 相似度 |
 | `MAX_CONCURRENCY` | `5` | 同时评测的样本数 |
+| `SAMPLES` | `1` | 每个指标重复采样次数（`--samples` 优先） |
+| `SAMPLE_TEMPERATURE` | `0.7` | 第 2 次起的采样温度 |
 | `REQUEST_TIMEOUT` | `60` | 单次请求超时（秒） |
 | `MAX_RETRIES` | `3` | 重试次数 |
 | `JSON_MODE` | `1` | 是否请求 `response_format=json_object` |
@@ -251,7 +288,7 @@ python -m pytest -q
 
 ## 局限
 
-- 未实现多次采样取均值与人工金标一致性校准（Kappa / Spearman）
+- 尚未做人工金标一致性校准（Kappa / Spearman）；多次采样已支持，但默认仍为单次以保证与历史数字同口径
 - 端到端运行器目前只适配 Dify Chat API；接入其他系统需按同样接口准备 `question + contexts + answer`
 - LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读；更换 judge 后应重判基线再比较
 - 主集 41 条已去重：3 组同主题样本现在是「直接提问」与「虚假前提」的对照，不再共用同一问题；`tests/test_dataset.py` 会阻止重复题回归

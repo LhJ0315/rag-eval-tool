@@ -83,6 +83,23 @@ def test_html_shows_tag_section():
     assert "adversarial" in html
 
 
+def test_html_shows_sampling_config_and_std():
+    report = _report([0.5, 0.5])
+    report["metadata"]["sampling"] = {
+        "runs_per_metric": 3,
+        "temperatures": [0.0, 0.7, 0.7],
+    }
+    report["summary"]["faithfulness"]["sampling_std"] = 0.12
+    report["summary"]["faithfulness"].update(
+        {"sampling_std_samples": 2, "partial_failures": 1, "failed_draws": 1}
+    )
+    html = render_html(report)
+    assert "每条采样 3 次" in html
+    assert "采样σ 0.12" in html
+    assert "2 条可估" in html
+    assert "采样缺次 1 条/1 次" in html
+
+
 def test_html_hides_tag_section_when_untagged_only():
     report = {
         "metadata": {"samples": 1},

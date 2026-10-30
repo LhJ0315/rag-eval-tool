@@ -12,6 +12,8 @@ class ContextRecall(BaseMetric):
         answer: str,
         contexts: list[str],
         ground_truth: str | None = None,
+        *,
+        temperature: float = 0.0,
     ) -> dict:
         if not ground_truth:
             return self.failure("未提供标准答案，召回率不参与统计")
@@ -28,7 +30,7 @@ class ContextRecall(BaseMetric):
 请输出 JSON 对象，格式：
 {{"covered_points": ["被覆盖的要点"], "missing_points": ["未被覆盖的要点"]}}
 只输出 JSON，不要输出解释。"""
-        data, raw = await self._call_llm_json(prompt)
+        data, raw = await self._call_llm_json(prompt, temperature=temperature)
         if not isinstance(data, dict):
             return self.failure("召回率分析结果不是合法 JSON", raw=raw[:500])
 
