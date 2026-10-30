@@ -145,8 +145,38 @@ python -m ragas_eval run --dataset data/system_dify_v1.json \
 | Context Recall | 0.870 | 0.817 | -0.053 |
 
 - 系统答案更短、更贴上下文，相关性与精确度高于 oracle 基线；召回略低。
-- hotpotqa 的瓶颈在检索而非生成：20 题中 5 题因未同时召回两跳证据而拒答（拒答组 Context Precision 0.05、Faithfulness 0.2），答出的 15 题 Faithfulness 1.0、Context Precision 0.922。
-- 检索诊断见 `results/system_dify_v1/retrieval_diagnostic.json`：top_k=4 时 39/41 至少召回一段参考证据，但多跳题从未覆盖全部证据，下一步做 top_k=6/8 消融。
+- hotpotqa 20 题中 5 题拒答。用零成本的 hit-testing 复核证据段落排名后，原因并不单一：
+  - Animorphs：正面证据排第 1，拒答属于生成/提示词问题；
+  - Guns N' Roses：直接证据（1999 年宣传单曲）排第 9，需要 `top_k≥10`；
+  - Vermont：所需会议段落排第 8，`top_k=4` 漏掉，`top_k≥8` 可覆盖；
+  - Big Stone Gap：所需事实（导演常驻的 Greenwich Village）在 top-10 内完全没有召回，属于语料/embedding 漏检；
+  - Brown State：参考答本身是「无法回答」，而问题问的是 country 人口、证据却是 Brown County 的 9,984，属数据集缺陷。
+- 结论：检索深度不是唯一瓶颈。5 题里最多 2 题能靠加大 `top_k` 覆盖到证据（Vermont 需 k≥8、Guns N' Roses 需 k≥10），且仍取决于模型能否利用新证据；另有 1 题在证据排第 1 时仍拒答（生成侧）、1 题 k=10 也召回不到、1 题是数据缺陷。因此没有跑全量 41 条的消融，只对 hotpotqa 子集补跑了 k=8/10 验证（见下）。
+- 检索诊断见 `results/system_dify_v1/retrieval_diagnostic.json`（39/41 至少召回一段参考证据）与 `results/system_dify_v1/topk_probe.json`。覆盖扫描（hit-testing，不调用 LLM；参考段落被结果以 Jaccard≥0.5 命中即算覆盖）：
+
+| 领域 | top_k=4 | top_k=6 | top_k=8 | top_k=10 |
+|---|---|---|---|---|
+| policy 平均参考段落覆盖率 | 0.668 | 0.768 | 0.768 | 0.785 |
+| hotpotqa 平均参考段落覆盖率 | 0.405 | 0.565 | 0.715 | 0.805 |
+
+policy 在 k=6 即饱和，hotpotqa 随 k 单调上升；但新增的多是次要段落，不足以扭转拒答。
+
+### top_k 消融（hotpotqa 20 条）
+
+同一 judge、同一问题集，policy 保持 k=4，只调整 hotpotqa：
+
+| top_k | Faithfulness | Answer Relevancy | Context Precision | Context Recall | 严格拒答 | 平均上下文数 |
+|---|---|---|---|---|---|---|
+| 4（基线） | 0.800 | 0.528 | 0.704 | 0.675 | 5/20 | 4 |
+| 8 | 0.900 | 0.570 | 0.707 | 0.775 | 3/20 | 8 |
+| 10 | 0.850 | 0.533 | 0.704 | 0.725 | 3/20 | 10 |
+
+- k=8 是拐点：Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Faithfulness +0.100；Context Recall +0.100 主要来自 Vermont 与 Giuseppe Verdi。Context Precision 基本不变（+0.003）。
+- k=10 不升反降：新增上下文成为噪声，2014 S/S 从部分拒答变成完整拒答，Faithfulness 回落到 0.850；Big Stone Gap（所需事实 top-10 仍召回不到）与 Brown State（数据缺陷）始终拒答。
+- 逐样本配对（k=8 vs k=4，20 条）：Faithfulness 3 胜 1 负 16 平；Context Recall 2 胜 0 负 18 平；Answer Relevancy 7 胜 6 负 7 平，judge 噪声明显，不宜过度解读单个指标的小幅变化。
+- 成本：Dify 生成 token 18,984 / 29,352 / 34,864。k=8、k=10 的 judge 用量分别为 162,004 / 144,728 tokens（k=10 命中 203 次缓存）；k=4 的 270,631 tokens 是全量 41 条口径，不能直接横向比较。
+- 工程结论：该知识库与模型组合下 hotpotqa 的最佳点是 k=8，继续加到 10 只增加噪声。另需注意 Dify 1.18 实际生效的检索深度取 app 的 `dataset_configs.top_k` 与数据集 `retrieval_model.top_k` 的较小值，只改数据集不会生效。
+- 合并两次已判分运行（policy k=4 + hotpotqa k=8），调优后的 41 条总体为 Faithfulness 0.951 / Answer Relevancy 0.675 / Context Precision 0.809 / Context Recall 0.866；相对 oracle 基线为 +0.084 / +0.169 / +0.200 / -0.004。该行由两次运行按领域拼接，不是单次端到端跑批，引用时需说明口径。
 
 ## 指标口径
 
@@ -223,6 +253,7 @@ python -m pytest -q
 - 端到端运行器目前只适配 Dify Chat API；接入其他系统需按同样接口准备 `question + contexts + answer`
 - LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读；更换 judge 后应重判基线再比较
 - 当前主集有 3 组同题 normal/adversarial 配对，接入真实系统后对抗组退化为重复样本，A/B 统计按 38 个不同问题配对
+- 2 条 hotpotqa 样本的参考答在生成阶段失败（输出「根据现有信息无法回答」），另有 1 条问题表述与证据不一致；它们只影响 oracle 基线的答案口径，不影响系统评测判分，待修复
 
 ## 安全
 
