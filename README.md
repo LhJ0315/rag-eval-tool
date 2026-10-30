@@ -102,7 +102,7 @@ python -m ragas_eval compare results/a.json results/b.json [--json]
 `data/eval_dataset.json` 是 41 条中英双语分层评测集：25 条 `normal`（20 条 HotpotQA + 5 条中文制度问答）、8 条 `boundary`、8 条 `adversarial`。
 
 - `boundary`：零上下文拒答、超长安全制度、制度版本冲突、条件型奖金、年假年限临界、加班时长取整、福利适用范围、年假跨年例外
-- `adversarial`：上下文注入、幻觉数字、检索噪声淹没、评分指令注入、配对错答（同题同上下文、仅替换错误答案）、捏造条款
+- `adversarial`：上下文注入、高置信数字陷阱、检索噪声淹没、评分指令注入、虚假前提纠错（同主题直接提问的对照）、缺失信息陷阱
 
 ```bash
 # 只跑正常层的前 3 条，并启用质量门禁（适合 CI 回归）
@@ -137,29 +137,30 @@ python -m ragas_eval run --dataset data/system_dify_v1.json \
 
 同一 judge（`deepseek-v4-pro-0813`）重判后的对比：
 
-| 指标 | 数据集参考答（oracle 基线） | Dify 系统 | 差值 |
+| 指标 | 数据集参考答基线 | Dify 系统 | 差值 |
 |---|---|---|---|
-| Faithfulness | 0.867 | 0.902 | +0.035 |
-| Answer Relevancy | 0.506 | 0.654 | +0.148 |
-| Context Precision | 0.609 | 0.807 | +0.198 |
+| Faithfulness | 0.984 | 0.889 | -0.095 |
+| Answer Relevancy | 0.502 | 0.647 | +0.145 |
+| Context Precision | 0.611 | 0.819 | +0.208 |
 | Context Recall | 0.870 | 0.817 | -0.053 |
 
-- 系统答案更短、更贴上下文，相关性与精确度高于 oracle 基线；召回略低。
-- hotpotqa 20 题中 5 题拒答。用零成本的 hit-testing 复核证据段落排名后，原因并不单一：
+- 参考答基线使用数据集的参考答与参考上下文（参考答均为修正后的正确答案；零上下文的宠物题 CP 无法计算，不计入均值）。参考上下文含 HotpotQA 干扰段，因此基线的 Context Precision 偏低，不能当作检索上界。
+- 系统答案更短、更贴问题，Answer Relevancy 与 Context Precision 明显更高；但 Faithfulness 低 0.095，说明生成侧仍会把相邻事实合并成上下文未直接支持的推断。Context Recall 略低 0.053，主要来自 hotpotqa 检索漏段。
+- hotpotqa 20 题在 k=4 下有 5 题宽口径拒答：Animorphs、Guns N' Roses、Vermont、Big Stone Gap、2014 S/S。Brown State 原题的 country/county 表述已修正，修正后 k=4 即可答出 9,984，不再计入拒答。
   - Animorphs：正面证据排第 1，拒答属于生成/提示词问题；
   - Guns N' Roses：直接证据（1999 年宣传单曲）排第 9，需要 `top_k≥10`；
   - Vermont：所需会议段落排第 8，`top_k=4` 漏掉，`top_k≥8` 可覆盖；
   - Big Stone Gap：所需事实（导演常驻的 Greenwich Village）在 top-10 内完全没有召回，属于语料/embedding 漏检；
-  - Brown State：参考答本身是「无法回答」，而问题问的是 country 人口、证据却是 Brown County 的 9,984，属数据集缺陷。
-- 结论：检索深度不是唯一瓶颈。5 题里最多 2 题能靠加大 `top_k` 覆盖到证据（Vermont 需 k≥8、Guns N' Roses 需 k≥10），且仍取决于模型能否利用新证据；另有 1 题在证据排第 1 时仍拒答（生成侧）、1 题 k=10 也召回不到、1 题是数据缺陷。因此没有跑全量 41 条的消融，只对 hotpotqa 子集补跑了 k=8/10 验证（见下）。
+  - 2014 S/S：k=4 只答出 YG Entertainment 并拒绝回答成立者，k=8/10 退化为完整拒答。
+- 结论：检索深度不是唯一瓶颈。k=4 的 5 题宽口径拒答中，k=8 让 Animorphs、Guns N' Roses、Vermont 转为回答，但 Animorphs 的证据本来排第 1（生成侧问题）；真正依赖加大 k 的是 Vermont（k≥8）和 Guns N' Roses（k≥10）。Big Stone Gap 在 k=10 仍召回不到，2014 S/S 在 k=8/10 因上下文噪声退化为完整拒答。因此只对 hotpotqa 子集补跑 k=8/10 验证（见下），没有对全量 41 条做消融。
 - 检索诊断见 `results/system_dify_v1/retrieval_diagnostic.json`（39/41 至少召回一段参考证据）与 `results/system_dify_v1/topk_probe.json`。覆盖扫描（hit-testing，不调用 LLM；参考段落被结果以 Jaccard≥0.5 命中即算覆盖）：
 
 | 领域 | top_k=4 | top_k=6 | top_k=8 | top_k=10 |
 |---|---|---|---|---|
-| policy 平均参考段落覆盖率 | 0.668 | 0.768 | 0.768 | 0.785 |
-| hotpotqa 平均参考段落覆盖率 | 0.405 | 0.565 | 0.715 | 0.805 |
+| policy 平均参考段落覆盖率 | 0.652 | 0.735 | 0.752 | 0.802 |
+| hotpotqa 平均参考段落覆盖率 | 0.405 | 0.565 | 0.715 | 0.800 |
 
-policy 在 k=6 即饱和，hotpotqa 随 k 单调上升；但新增的多是次要段落，不足以扭转拒答。
+policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升；hotpotqa 随 k 单调上升，但新增的多是次要段落，不足以扭转拒答。
 
 ### top_k 消融（hotpotqa 20 条）
 
@@ -167,16 +168,16 @@ policy 在 k=6 即饱和，hotpotqa 随 k 单调上升；但新增的多是次�
 
 | top_k | Faithfulness | Answer Relevancy | Context Precision | Context Recall | 严格拒答 | 平均上下文数 |
 |---|---|---|---|---|---|---|
-| 4（基线） | 0.800 | 0.528 | 0.704 | 0.675 | 5/20 | 4 |
-| 8 | 0.900 | 0.570 | 0.707 | 0.775 | 3/20 | 8 |
-| 10 | 0.850 | 0.533 | 0.704 | 0.725 | 3/20 | 10 |
+| 4（基线） | 0.780 | 0.513 | 0.729 | 0.675 | 4/20 | 4 |
+| 8 | 0.900 | 0.572 | 0.732 | 0.775 | 2/20 | 8 |
+| 10 | 0.900 | 0.519 | 0.729 | 0.725 | 2/20 | 10 |
 
-- k=8 是拐点：Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Faithfulness +0.100；Context Recall +0.100 主要来自 Vermont 与 Giuseppe Verdi。Context Precision 基本不变（+0.003）。
-- k=10 不升反降：新增上下文成为噪声，2014 S/S 从部分拒答变成完整拒答，Faithfulness 回落到 0.850；Big Stone Gap（所需事实 top-10 仍召回不到）与 Brown State（数据缺陷）始终拒答。
-- 逐样本配对（k=8 vs k=4，20 条）：Faithfulness 3 胜 1 负 16 平；Context Recall 2 胜 0 负 18 平；Answer Relevancy 7 胜 6 负 7 平，judge 噪声明显，不宜过度解读单个指标的小幅变化。
-- 成本：Dify 生成 token 18,984 / 29,352 / 34,864。k=8、k=10 的 judge 用量分别为 162,004 / 144,728 tokens（k=10 命中 203 次缓存）；k=4 的 270,631 tokens 是全量 41 条口径，不能直接横向比较。
-- 工程结论：该知识库与模型组合下 hotpotqa 的最佳点是 k=8，继续加到 10 只增加噪声。另需注意 Dify 1.18 实际生效的检索深度取 app 的 `dataset_configs.top_k` 与数据集 `retrieval_model.top_k` 的较小值，只改数据集不会生效。
-- 合并两次已判分运行（policy k=4 + hotpotqa k=8），调优后的 41 条总体为 Faithfulness 0.951 / Answer Relevancy 0.675 / Context Precision 0.809 / Context Recall 0.866；相对 oracle 基线为 +0.084 / +0.169 / +0.200 / -0.004。该行由两次运行按领域拼接，不是单次端到端跑批，引用时需说明口径。
+- k=8 是拐点：Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Faithfulness +0.120；Context Recall +0.100 主要来自 Vermont 与 Giuseppe Verdi。Context Precision 基本不变（+0.003）。
+- k=10 与 k=8 同为 F 0.900，但 Answer Relevancy 回落到 0.519、Context Recall 回落到 0.725；2014 S/S 从部分拒答变成完整拒答，Big Stone Gap 仍召回不到。多出的 2 段上下文只增加噪声和成本。
+- 逐样本配对（k=8 vs k=4，20 条）：Faithfulness 4 胜 1 负 15 平；Context Recall 2 胜 0 负 18 平；Answer Relevancy 8 胜 6 负 6 平；Context Precision 2 胜 3 负 15 平，judge 噪声明显，不宜过度解读单个指标的小幅变化。
+- 成本：Dify 生成 token 19,081 / 29,264 / 34,548。k=8、k=10 首轮 judge 用量分别约 162k / 145k tokens；数据集修正后只对 Brown 增量重判（k=8 9.8k、k=10 9.5k tokens），其余命中缓存。
+- 工程结论：该知识库与模型组合下 hotpotqa 的最佳点是 k=8，继续加到 10 不带来质量收益。另需注意 Dify 1.18 实际生效的检索深度取 app 的 `dataset_configs.top_k` 与数据集 `retrieval_model.top_k` 的较小值，只改数据集不会生效。
+- 合并两次已判分运行（policy k=4 + hotpotqa k=8），调优后的 41 条总体为 Faithfulness 0.947 / Answer Relevancy 0.675 / Context Precision 0.821 / Context Recall 0.866；相对参考答基线为 -0.037 / +0.173 / +0.210 / -0.004。该行由两次运行按领域拼接，不是单次端到端跑批，引用时需说明口径。
 
 ## 指标口径
 
@@ -252,8 +253,9 @@ python -m pytest -q
 - 未实现多次采样取均值与人工金标一致性校准（Kappa / Spearman）
 - 端到端运行器目前只适配 Dify Chat API；接入其他系统需按同样接口准备 `question + contexts + answer`
 - LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读；更换 judge 后应重判基线再比较
-- 当前主集有 3 组同题 normal/adversarial 配对，接入真实系统后对抗组退化为重复样本，A/B 统计按 38 个不同问题配对
-- 2 条 hotpotqa 样本的参考答在生成阶段失败（输出「根据现有信息无法回答」），另有 1 条问题表述与证据不一致；它们只影响 oracle 基线的答案口径，不影响系统评测判分，待修复
+- 主集 41 条已去重：3 组同主题样本现在是「直接提问」与「虚假前提」的对照，不再共用同一问题；`tests/test_dataset.py` 会阻止重复题回归
+- HotpotQA 有 5 道 yes/no 题，`ground_truth` 仍是单字 yes/no；当前 Context Recall 按要点字面覆盖判断，对这类短答不稳定（同一题在不同 top_k 下会 0/1 跳变），最多拉低总体 CR 约 0.12。当前保留原 GT，并在消融解读中避免依赖单题 CR；后续可把 GT 扩写为事实句或改进指标 prompt
+- 参考答基线的 Context Precision 使用数据集参考上下文（含 HotpotQA 干扰段），不代表检索上界；与系统检索上下文的 CP 只能作方向性比较
 
 ## 安全
 

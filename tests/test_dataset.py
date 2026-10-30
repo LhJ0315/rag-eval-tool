@@ -24,3 +24,16 @@ def test_master_dataset_layers():
         assert len(DIFFICULTY_TAGS.intersection(sample["tags"])) == 1
         if {"boundary", "adversarial"} & set(sample["tags"]):
             assert sample["note"].strip()
+
+
+def test_questions_are_unique():
+    dataset = load_dataset(DATASET)
+    questions = [sample["question"] for sample in dataset]
+    assert len(questions) == len(set(questions))
+
+
+def test_normal_reference_answers_are_answers():
+    dataset = load_dataset(DATASET)
+    for sample in dataset:
+        if "normal" in sample["tags"]:
+            assert "无法回答" not in sample["answer"]

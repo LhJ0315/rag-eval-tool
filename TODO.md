@@ -20,13 +20,15 @@
 | P2-4 HTML 报告 | 自包含单文件：雷达图、分布、最差样本 Top 10 |
 | P2-5 A/B 对比 | `python -m ragas_eval compare a.json b.json`，输出指标差值与胜/平/负 |
 | P3-1 CLI | `run` / `compare` 两个子命令，不再需要改源码 |
-| P3-2 单元测试 | `pytest` 32 项，全部离线 |
+| P3-2 单元测试 | `pytest` 34 项，全部离线 |
 | P3-3 CI | GitHub Actions：push/PR 跑离线测试；配置 Key secret 后跑 normal 层小样本评测，`--fail-under` 门禁并上传报告 |
 | P3-4 版本元数据 | 报告记录数据集指纹、judge 模型、被测系统版本 |
-| P3-6 分层评测 | 数据集支持难度 + 领域标签，报告按标签聚合；主集扩至 41 条中英双语（25 normal / 8 boundary / 8 adversarial），含边界、注入、配对错答等场景 |
+| P3-6 分层评测 | 数据集支持难度 + 领域标签，报告按标签聚合；主集扩至 41 条中英双语（25 normal / 8 boundary / 8 adversarial），含边界、注入、虚假前提等场景 |
 | P2-6 接入真实 RAG API | `scripts/run_dify_system.py` 按标签路由到 Dify Chat App，采集回答与 `retriever_resources`；已完成 Dify 1.18 + BGE-M3 的 41 条端到端评测 |
-| 检索深度诊断 | 零成本 hit-testing 扫描 top_k=4/6/8/10：policy 覆盖率在 k=6 饱和（0.768），hotpotqa 由 0.405 升至 0.805；并结合证据段落排名复核拒答原因（生成侧 1、k 受限 2、召回不到 1、数据缺陷 1） |
-| top_k 消融 | hotpotqa 20 条补跑 k=8/10：k=8 最佳（F 0.800→0.900，CR 0.675→0.775，拒答 5→3），k=10 回落（F 0.850）；合并调优口径 F 0.951 / AR 0.675 / CP 0.809 / CR 0.866 |
+| 检索深度诊断 | 零成本 hit-testing 扫描 top_k=4/6/8/10：policy 覆盖率 0.652/0.735/0.752/0.802（k=6 后增幅收窄），hotpotqa 0.405/0.565/0.715/0.800；结合证据排名复核拒答原因（生成侧 1、k 受限 2、召回不到 1、上下文噪声 1） |
+| top_k 消融 | hotpotqa 20 条补跑 k=8/10：k=8 最佳（F 0.780→0.900，CR 0.675→0.775，严格拒答 4→2），k=10 的 F 持平但 AR/CR 回落；合并调优口径 F 0.947 / AR 0.675 / CP 0.821 / CR 0.866 |
+| 数据修复 | 修正 2 条坏参考答（Random House、Brown State 的 country/county）、1 条无依据表述（实习生答案中的「外包人员」）、3 条对抗参考答（年假满 10 年、报销 15 个工作日、病假天数）；参考答基线 F 由 0.867 升至 0.984 |
+| 数据去重与对抗改造 | 3 组同题 normal/adversarial 改为同主题「直接提问 vs 虚假前提」对照；新增题目唯一性与 normal 参考答非拒答测试 |
 
 ## 待完成
 
@@ -35,6 +37,5 @@
 - **P1-6 人工金标校准**：抽 20–30 条人工打分，计算 Spearman / Cohen's Kappa
 - **P3-5 本地 judge 验证**：Ollama / vLLM 的 OpenAI 兼容接口已可用，尚未实测
 - **检索消融后续**：k=8 已验证为 hotpotqa 最佳点；如需单次端到端口径，可把 hotpotqa 默认 top_k 改为 8 后重跑全量（judge 约 270k tokens），否则 README 中的调优数字按两次运行合并引用
-- **数据修复**：2 条 hotpotqa 参考答为「根据现有信息无法回答」（Random House、Brown State），另 1 条问题表述与证据不一致；需修参考答或剔除，并说明对 oracle 基线数字的影响
-- **数据集去重与对抗改造**：3 组同题 normal/adversarial 配对在系统评测中退化，需去重或把注入文本写入知识库
+- **yes/no GT 与 Context Recall 口径**：HotpotQA 5 道 yes/no 题的 GT 为单字 yes/no，CR 判定会随 top_k 跳变（同题 0/1）；可把 GT 扩写为事实句或改指标 prompt，并重判受影响的 CR
 - **数据集扩充**：主评测集 41 条（25 normal / 8 boundary / 8 adversarial）；英文侧继续扩到 100–200 条并记录版本
