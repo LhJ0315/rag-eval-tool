@@ -37,3 +37,9 @@ def test_normal_reference_answers_are_answers():
     for sample in dataset:
         if "normal" in sample["tags"]:
             assert "无法回答" not in sample["answer"]
+
+
+def test_ground_truths_are_not_bare_yes_no():
+    dataset = load_dataset(DATASET)
+    for sample in dataset:
+        assert sample["ground_truth"].strip().lower() not in {"yes", "no"}
