@@ -80,6 +80,7 @@ def test_report_contains_metadata_and_summary(tmp_path):
     )
     assert report["metadata"]["judge_model"] == "gpt-4o-mini"
     assert report["metadata"]["samples"] == 2
+    assert report["metadata"]["metric_versions"] == {"counting": "v1"}
     assert report["summary"]["counting"]["avg_score"] == 0.4
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from .cache import ResponseCache
 from .compare import compare_reports, format_table, load_report
 from .config import ConfigError, Settings
-from .dataset import filter_by_tags, load_dataset
+from .dataset import filter_by_tags, load_dataset, samples_from_report
 from .engine import METRIC_CLASSES, EvaluationEngine, quality_gate
 
 
@@ -74,6 +74,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-cache", action="store_true", help="禁用响应缓存")
     run.add_argument("--env-file", default=".env", help=".env 文件路径")
 
+    rejudge = sub.add_parser("rejudge", help="用当前指标版本重判已有报告中的指定指标")
+    rejudge.add_argument("--report", required=True, help="已有评测报告 JSON")
+    rejudge.add_argument("--output-dir", default="results/rejudge", help="报告输出目录")
+    rejudge.add_argument(
+        "--metrics", default="context_recall", help="逗号分隔的指标名（默认重判 context_recall）"
+    )
+    rejudge.add_argument("--max-concurrency", type=int, default=None, help="并发样本数")
+    rejudge.add_argument("--samples", type=int, default=None, help="每个指标重复采样次数")
+    rejudge.add_argument("--threshold", type=float, default=0.6, help="低分样本阈值")
+    rejudge.add_argument("--system-version", default=None, help="覆盖报告中的被测系统版本")
+    rejudge.add_argument("--no-html", action="store_true", help="不生成 HTML 报告")
+    rejudge.add_argument("--no-cache", action="store_true", help="禁用响应缓存")
+    rejudge.add_argument("--env-file", default=".env", help=".env 文件路径")
+
     compare = sub.add_parser("compare", help="对比两份评测报告")
     compare.add_argument("report_a", help="基线报告 JSON")
     compare.add_argument("report_b", help="新版本报告 JSON")
@@ -133,6 +147,39 @@ async def _evaluate(args, settings: Settings, cache: ResponseCache | None) -> in
     return 0
 
 
+async def _rejudge(args, settings: Settings, cache: ResponseCache | None) -> int:
+    source = load_report(args.report)
+    metadata = source.get("metadata") or {}
+    dataset = samples_from_report(source)
+    metrics = [name.strip() for name in args.metrics.split(",") if name.strip()]
+    engine = EvaluationEngine(
+        settings,
+        cache=cache,
+        metrics=metrics,
+        max_concurrency=args.max_concurrency,
+        samples=args.samples,
+    )
+    try:
+        await engine.evaluate_dataset(
+            dataset,
+            output_dir=args.output_dir,
+            dataset_name=metadata.get("dataset"),
+            system_version=args.system_version or metadata.get("system_version"),
+            html=not args.no_html,
+            threshold=args.threshold,
+            metadata_extra={
+                "rejudged_from": str(Path(args.report)),
+                "rejudged_metrics": metrics,
+                "source_metric_versions": metadata.get("metric_versions"),
+            },
+        )
+    finally:
+        await engine.client.aclose()
+        if cache is not None:
+            cache.close()
+    return 0
+
+
 def _cmd_run(args) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -141,6 +188,16 @@ def _cmd_run(args) -> int:
     settings = Settings.from_env(args.env_file)
     cache = None if args.no_cache else ResponseCache(settings.cache_path)
     return asyncio.run(_evaluate(args, settings, cache))
+
+
+def _cmd_rejudge(args) -> int:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _setup_logging(output_dir / f"rejudge_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+    settings = Settings.from_env(args.env_file)
+    cache = None if args.no_cache else ResponseCache(settings.cache_path)
+    return asyncio.run(_rejudge(args, settings, cache))
 
 
 def _cmd_compare(args) -> int:
@@ -158,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "run":
             return _cmd_run(args)
+        if args.command == "rejudge":
+            return _cmd_rejudge(args)
         return _cmd_compare(args)
     except ConfigError as exc:
         print(f"配置错误：{exc}", file=sys.stderr)

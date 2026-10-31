@@ -140,6 +140,74 @@ def test_score_calibration_aligned_ratings():
         assert block["mismatches"] == []
 
 
+def _threshold_calibration() -> tuple[dict, dict]:
+    items = [
+        {
+            "id": f"C{index:02d}",
+            "question": f"q{index}",
+            "tags": ["normal"],
+            "judge": {
+                metric: {"score": 1.0, "skipped": False, "reason": "ok"}
+                for metric in METRICS
+            },
+        }
+        for index in (1, 2)
+    ]
+    ratings = {
+        "items": [
+            _rating_item("C01", {metric: 3 for metric in METRICS}),
+            _rating_item("C02", {metric: 4 for metric in METRICS}),
+        ]
+    }
+    return items, ratings
+
+
+def test_score_calibration_uses_metric_specific_thresholds():
+    items, ratings = _threshold_calibration()
+    result = score_calibration(ratings, {"metadata": {"n": 2}, "items": items})
+    assert result["human_pass_thresholds"] == {
+        "faithfulness": 3,
+        "answer_relevancy": 3,
+        "context_precision": 4,
+        "context_recall": 4,
+    }
+    assert result["metrics"]["answer_relevancy"]["mismatches"] == []
+    cp_mismatches = result["metrics"]["context_precision"]["mismatches"]
+    assert [item["id"] for item in cp_mismatches] == ["C01"]
+    assert cp_mismatches[0]["human_pass"] is False
+
+
+def test_score_calibration_global_override_and_sensitivity():
+    items, ratings = _threshold_calibration()
+    result = score_calibration(ratings, {"metadata": {"n": 2}, "items": items}, human_pass_threshold=3)
+    assert set(result["human_pass_thresholds"].values()) == {3}
+    assert result["metrics"]["context_precision"]["mismatches"] == []
+    sensitivity = result["threshold_sensitivity"]["context_precision"]
+    assert [row["human_pass_threshold"] for row in sensitivity] == [3, 4]
+    assert sensitivity[0]["observed_agreement"] == 1.0
+    assert sensitivity[1]["observed_agreement"] == 0.5
+    assert sensitivity[0]["human_pass_threshold"] == 3
+    assert sensitivity[1]["human_pass_threshold"] == 4
+    markdown = render_calibration_markdown(result)
+    assert "阈值敏感性" in markdown
+    assert "人工通过线按指标配置" in markdown
+
+
+def test_score_calibration_rejects_conflicting_or_invalid_thresholds():
+    items, ratings = _threshold_calibration()
+    calibration = {"metadata": {"n": 2}, "items": items}
+    for kwargs in (
+        {"human_pass_threshold": 3, "human_pass_by_metric": {"context_precision": 4}},
+        {"human_pass_by_metric": {"unknown_metric": 4}},
+        {"human_pass_by_metric": {"context_precision": 6}},
+    ):
+        try:
+            score_calibration(ratings, calibration, **kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"应拒绝非法阈值配置：{kwargs}")
+
+
 def test_score_calibration_rejects_stale_sheet():
     items = [
         {

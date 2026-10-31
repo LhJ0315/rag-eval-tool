@@ -25,6 +25,14 @@ METRIC_HINTS = {
 DEFAULT_QUOTAS = {"normal_policy": 5, "normal_hotpotqa": 8, "boundary": 6, "adversarial": 6}
 JUDGE_PASS = 0.6
 HUMAN_PASS = 3
+# CP/CR 的 3 分是“部分满足”，默认按不通过处理；F/AR 的 3 分仍算通过。
+HUMAN_PASS_BY_METRIC = {
+    "faithfulness": 3,
+    "answer_relevancy": 3,
+    "context_precision": 4,
+    "context_recall": 4,
+}
+HUMAN_PASS_SENSITIVITY = (3, 4)
 SHEET_SCHEMA_VERSION = 1
 
 
@@ -199,7 +207,7 @@ def build_calibration(report: dict, n: int = 25, seed: int = 20261031) -> dict:
             "quotas": quotas,
             "selection": "标签配额 + 全部纯拒答 + AR/CP/CR 低/中/高分箱覆盖",
             "judge_pass_threshold": JUDGE_PASS,
-            "human_pass_threshold": HUMAN_PASS,
+            "human_pass_thresholds": dict(HUMAN_PASS_BY_METRIC),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         },
         "items": items,
@@ -214,7 +222,8 @@ def blind_payload(calibration: dict) -> dict:
             "seed": metadata["seed"],
             "sheet_id": metadata["sheet_id"],
             "created_at": metadata["created_at"],
-            "human_pass_threshold": metadata["human_pass_threshold"],
+            "human_pass_thresholds": metadata.get("human_pass_thresholds")
+            or dict(HUMAN_PASS_BY_METRIC),
         },
         "items": [
             {
@@ -744,13 +753,51 @@ def _human_rating(value) -> int | None:
     return rating
 
 
+def _resolve_human_thresholds(
+    human_pass_threshold: int | None,
+    human_pass_by_metric: dict[str, int] | None,
+) -> dict[str, int]:
+    if human_pass_threshold is not None and human_pass_by_metric is not None:
+        raise ValueError("human_pass_threshold 与 human_pass_by_metric 不能同时指定")
+    if human_pass_by_metric is not None:
+        unknown = sorted(set(human_pass_by_metric) - set(METRICS))
+        if unknown:
+            raise ValueError(f"未知指标：{', '.join(unknown)}")
+        thresholds = dict(HUMAN_PASS_BY_METRIC)
+        for metric, value in human_pass_by_metric.items():
+            if not 1 <= int(value) <= 5:
+                raise ValueError(f"人工通过阈值必须在 1–5 之间，{metric} 当前为 {value}")
+            thresholds[metric] = int(value)
+        return thresholds
+    if human_pass_threshold is not None:
+        if not 1 <= int(human_pass_threshold) <= 5:
+            raise ValueError(f"人工通过阈值必须在 1–5 之间，当前为 {human_pass_threshold}")
+        return {metric: int(human_pass_threshold) for metric in METRICS}
+    return dict(HUMAN_PASS_BY_METRIC)
+
+
+def _binary_agreement(pairs: list[tuple[float, int]], judge_threshold: float, human_threshold: int) -> dict:
+    if not pairs:
+        return {"kappa": None, "n": 0, "reason": "没有可配对样本", "observed_agreement": None, "human_pass_rate": None}
+    a = [1 if pair[0] >= judge_threshold else 0 for pair in pairs]
+    b = [1 if pair[1] >= human_threshold else 0 for pair in pairs]
+    kappa = cohen_kappa(a, b)
+    return {
+        **kappa,
+        "human_pass_rate": round(sum(b) / len(b), 4),
+        "judge_pass_rate": round(sum(a) / len(a), 4),
+    }
+
+
 def score_calibration(
     ratings: dict,
     calibration: dict,
     judge_threshold: float = JUDGE_PASS,
-    human_pass_threshold: int = HUMAN_PASS,
+    human_pass_threshold: int | None = None,
+    human_pass_by_metric: dict[str, int] | None = None,
 ) -> dict:
     """按指标把人工 1–5 分与 judge 0–1 分配对，计算 Spearman 与二分类 Kappa。"""
+    thresholds = _resolve_human_thresholds(human_pass_threshold, human_pass_by_metric)
     expected_sheet = (calibration.get("metadata") or {}).get("sheet_id")
     actual_sheet = ratings.get("sheet_id")
     if expected_sheet and actual_sheet and actual_sheet != expected_sheet:
@@ -771,12 +818,15 @@ def score_calibration(
         "completed_at": ratings.get("completed_at"),
         "metadata": calibration.get("metadata", {}),
         "judge_threshold": judge_threshold,
-        "human_pass_threshold": human_pass_threshold,
+        "human_pass_thresholds": thresholds,
         "metrics": {},
+        "threshold_sensitivity": {},
     }
+    pairs_by_metric: dict[str, list[tuple[float, int]]] = {}
     for metric in METRICS:
         pairs = []
         mismatches = []
+        human_threshold = thresholds[metric]
         for sample_id, key_item in key_items.items():
             judge = key_item["judge"][metric]
             judge_score = judge.get("score")
@@ -786,7 +836,7 @@ def score_calibration(
             judge_score = float(judge_score)
             pairs.append((judge_score, human))
             judge_pass = judge_score >= judge_threshold
-            human_pass = human >= human_pass_threshold
+            human_pass = human >= human_threshold
             if judge_pass != human_pass:
                 mismatches.append(
                     {
@@ -799,23 +849,32 @@ def score_calibration(
                         "tags": key_item.get("tags", []),
                     }
                 )
+        pairs_by_metric[metric] = pairs
         x = [pair[0] for pair in pairs]
         y = [pair[1] for pair in pairs]
         rho = spearman(x, y) if pairs else {"rho": None, "p_value": None, "n": 0, "reason": "没有可配对样本"}
-        a = [1 if pair[0] >= judge_threshold else 0 for pair in pairs]
-        b = [1 if pair[1] >= human_pass_threshold else 0 for pair in pairs]
-        kappa = cohen_kappa(a, b) if pairs else {"kappa": None, "n": 0, "reason": "没有可配对样本"}
+        agreement = _binary_agreement(pairs, judge_threshold, human_threshold)
         result["metrics"][metric] = {
             "label": METRIC_LABELS[metric],
+            "human_pass_threshold": human_threshold,
             "n": len(pairs),
             "judge_mean": round(sum(x) / len(x), 4) if x else None,
             "human_mean": round(sum(y) / len(y), 4) if y else None,
             "spearman": rho,
-            "kappa": kappa,
-            "judge_pass_rate": round(sum(a) / len(a), 4) if a else None,
-            "human_pass_rate": round(sum(b) / len(b), 4) if b else None,
+            "kappa": agreement,
+            "judge_pass_rate": agreement["judge_pass_rate"],
+            "human_pass_rate": agreement["human_pass_rate"],
             "mismatches": mismatches,
         }
+    for metric in METRICS:
+        result["threshold_sensitivity"][metric] = [
+            {
+                "human_pass_threshold": threshold,
+                "judge_threshold": judge_threshold,
+                **_binary_agreement(pairs_by_metric[metric], judge_threshold, threshold),
+            }
+            for threshold in HUMAN_PASS_SENSITIVITY
+        ]
     return result
 
 
@@ -837,12 +896,13 @@ def render_calibration_markdown(result: dict) -> str:
         f"- 样本数：{metadata.get('n', 'N/A')}（{metadata.get('selection', '目的抽样')}）",
         f"- 数据集指纹：`{metadata.get('dataset_fingerprint') or 'N/A'}`",
         f"- 被测系统：`{metadata.get('system_version') or 'N/A'}`",
-        f"- 判定阈值：judge ≥ {result.get('judge_threshold')} 为通过；人工 ≥ {result.get('human_pass_threshold')} 为通过",
+        f"- 判定阈值：judge ≥ {result.get('judge_threshold')} 为通过；人工通过线按指标配置："
+        + "、".join(f"{METRIC_LABELS[metric]} ≥{result['human_pass_thresholds'][metric]}" for metric in METRICS),
         "",
         "## 汇总",
         "",
-        "| 指标 | n | Spearman ρ | p | Cohen's κ | 一致率 | judge 通过率 | 人工通过率 | 假阳性/假阴性 | 备注 |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| 指标 | 人工阈值 | n | Spearman ρ | p | Cohen's κ | 一致率 | judge 通过率 | 人工通过率 | 假阳性/假阴性 | 备注 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for metric in METRICS:
         data = result["metrics"][metric]
@@ -856,8 +916,9 @@ def render_calibration_markdown(result: dict) -> str:
         fp = counts.get("judge_pass_human_fail", 0)
         fn = counts.get("judge_fail_human_pass", 0)
         lines.append(
-            "| {label} | {n} | {rho} | {p} | {kappa} | {agree} | {jp} | {hp} | {fp}/{fn} | {note} |".format(
+            "| {label} | {threshold} | {n} | {rho} | {p} | {kappa} | {agree} | {jp} | {hp} | {fp}/{fn} | {note} |".format(
                 label=data["label"],
+                threshold=data["human_pass_threshold"],
                 n=data["n"],
                 rho=_format(rho),
                 p=_format(data["spearman"].get("p_value")),
@@ -870,13 +931,43 @@ def render_calibration_markdown(result: dict) -> str:
                 note=kappa_note,
             )
         )
+    lines.extend(
+        [
+            "",
+            "## 阈值敏感性",
+            "",
+            "judge 阈值固定，改变人工通过线（3 = 部分满足算通过，4 = 必须基本满足才通过），观察 κ 与一致率的变化。"
+            "主表使用按指标默认阈值（F/AR ≥3，CP/CR ≥4）；三分类的 3 分对 CP/CR 是“部分满足”，默认不算通过。",
+            "",
+            "| 指标 | 人工阈值 | n | Cohen's κ | 一致率 | 人工通过率 | judge 通过率 | 备注 |",
+            "|---|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for metric in METRICS:
+        main_threshold = result["metrics"][metric]["human_pass_threshold"]
+        for row in result.get("threshold_sensitivity", {}).get(metric, []):
+            note = "主表" if row["human_pass_threshold"] == main_threshold else ""
+            note = note or ("退化（一方无方差）" if row.get("degenerate") else "")
+            lines.append(
+                "| {label} | {threshold} | {n} | {kappa} | {agree} | {hp} | {jp} | {note} |".format(
+                    label=result["metrics"][metric]["label"],
+                    threshold=row["human_pass_threshold"],
+                    n=row.get("n"),
+                    kappa=_format(row.get("kappa")),
+                    agree=_format(row.get("observed_agreement")) if row.get("observed_agreement") is not None else "N/A",
+                    hp=_format(row.get("human_pass_rate")),
+                    jp=_format(row.get("judge_pass_rate")),
+                    note=note,
+                )
+            )
     lines.extend(["", "## 逐指标明细", ""])
     for metric in METRICS:
         data = result["metrics"][metric]
         lines.append(f"### {data['label']}")
         lines.append("")
         lines.append(
-            f"- 可配对样本：{data['n']}；judge 均值 {_format(data['judge_mean'])}；人工均值 {_format(data['human_mean'])}"
+            f"- 可配对样本：{data['n']}；人工通过线 ≥{data['human_pass_threshold']}；"
+            f"judge 均值 {_format(data['judge_mean'])}；人工均值 {_format(data['human_mean'])}"
         )
         if data["spearman"].get("rho") is None:
             lines.append(f"- Spearman：不可估（{data['spearman'].get('reason', '未知原因')}）")
@@ -916,6 +1007,8 @@ def render_calibration_markdown(result: dict) -> str:
             "- 这是单评分人的一致性检查，不是人工金标；没有第二评分人，无法估计评分者间信度。",
             "- 25 条为目的抽样，低分边界样本被刻意多抽，不能用来估计总体均值或通过率。",
             "- 人工 1–5 分与 judge 0–1 分是不同量纲，Spearman 只衡量排序一致性；Kappa 衡量按阈值二分后的一致性。",
+            "- 人工通过线按指标配置：F/AR 的 3 分是“部分满足但有缺口”，仍算通过；CP/CR 的 3 分默认按不通过处理。"
+            "主表与敏感性表的差异说明 κ 对阈值敏感，不能只报一个数字。",
             "- 某一方分数/判定无方差时，Spearman 或 Kappa 不可估；报告会显式标出，不能用 0 代替。",
             "- 若 Faithfulness 的 judge 分数全部为 1.0，该指标的 Spearman 不可估，只能看一致率和假阳性样本。",
         ]

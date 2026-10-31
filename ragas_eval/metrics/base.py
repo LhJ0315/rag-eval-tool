@@ -7,6 +7,7 @@ from ..llm import LLMClient
 
 class BaseMetric(ABC):
     name: str = "base_metric"
+    version: str = "v1"
 
     def __init__(self, llm: LLMClient):
         self.llm = llm

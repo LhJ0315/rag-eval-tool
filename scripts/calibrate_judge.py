@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ragas_eval.calibration import (
     DEFAULT_QUOTAS,
-    HUMAN_PASS,
+    HUMAN_PASS_BY_METRIC,
     JUDGE_PASS,
     build_calibration,
     render_calibration_markdown,
@@ -46,6 +46,22 @@ def make_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_pass_map(value: str) -> dict[str, int]:
+    result = {}
+    for chunk in value.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise ValueError(f"--human-pass-map 需要 metric=score 格式，当前为 {chunk!r}")
+        metric, raw = (part.strip() for part in chunk.split("=", 1))
+        try:
+            result[metric] = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"--human-pass-map 的分数必须是整数，{metric} 当前为 {raw!r}") from exc
+    return result
+
+
 def score_command(args: argparse.Namespace) -> int:
     ratings = _load_json(args.ratings)
     calibration = _load_json(args.key)
@@ -54,6 +70,7 @@ def score_command(args: argparse.Namespace) -> int:
         calibration,
         judge_threshold=args.judge_threshold,
         human_pass_threshold=args.human_pass,
+        human_pass_by_metric=_parse_pass_map(args.human_pass_map) if args.human_pass_map else None,
     )
     markdown = render_calibration_markdown(result)
     output = Path(args.output)
@@ -83,7 +100,17 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--key", required=True, help="make 生成的 calibration_key.json")
     score.add_argument("--output", default="results/calibration/calibration_report.md", help="Markdown 报告路径")
     score.add_argument("--judge-threshold", type=float, default=JUDGE_PASS, help="judge 二分类通过阈值")
-    score.add_argument("--human-pass", type=int, default=HUMAN_PASS, help="人工二分类通过阈值（1–5）")
+    score.add_argument(
+        "--human-pass",
+        type=int,
+        default=None,
+        help="人工二分类通过阈值（1–5），指定后覆盖所有指标的默认值",
+    )
+    score.add_argument(
+        "--human-pass-map",
+        default=None,
+        help="按指标指定人工通过阈值，如 context_precision=4,context_recall=4；未指定的指标用默认值",
+    )
     score.set_defaults(handler=score_command)
     return parser
 

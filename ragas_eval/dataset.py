@@ -61,6 +61,28 @@ def load_dataset(file_path: str | Path) -> list[dict]:
     return dataset
 
 
+def samples_from_report(report: dict) -> list[dict]:
+    """从已有评测报告还原可重判的样本，保留回答、上下文、标准答案与标签。"""
+    results = report.get("detailed_results") or []
+    if not results:
+        raise ValueError("报告没有 detailed_results，无法重判")
+    samples = []
+    for index, item in enumerate(results):
+        question = item.get("question")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError(f"报告第 {index} 条样本缺少 question")
+        samples.append(
+            {
+                "question": question,
+                "answer": item.get("answer") or "",
+                "contexts": list(item.get("contexts") or []),
+                "ground_truth": item.get("ground_truth") or "",
+                "tags": _normalize_tags(item, index),
+            }
+        )
+    return samples
+
+
 def filter_by_tags(dataset: list[dict], tags: list[str] | set[str]) -> list[dict]:
     wanted = {tag.strip() for tag in tags if tag.strip()}
     if not wanted:

@@ -77,12 +77,41 @@ def test_answer_relevancy_prefers_embeddings_when_configured():
     assert len(llm.embed_calls) == 1
 
 
-def test_context_recall_scores_coverage():
+def test_context_recall_scores_relation_level_coverage():
     llm = FakeLLM(
-        json_responses=[({"covered_points": ["p1"], "missing_points": ["p2"]}, "")]
+        json_responses=[
+            (
+                {
+                    "points": [
+                        {"point": "p1", "covered": True, "evidence": "ctx states p1"},
+                        {"point": "p2", "covered": False, "evidence": "", "reason": "缺少关系"},
+                    ]
+                },
+                "",
+            )
+        ]
     )
     result = asyncio.run(ContextRecall(llm).score("q", "a", ["ctx"], "truth"))
     assert result["score"] == 0.5
+    assert result["metric_version"] == "relation-v2"
+    assert result["missing_points"] == ["p2"]
+    prompt = llm.json_calls[0]
+    assert "关系级覆盖" in prompt
+    assert "不要把上下文或常识中的其他事实拆成额外要点" in prompt
+    assert "允许跨段组合" in prompt
+    assert "不要用常识补全" in prompt
+    assert "q" in prompt
+
+
+def test_context_recall_requires_evidence_for_covered_points():
+    llm = FakeLLM(
+        json_responses=[
+            ({"points": [{"point": "p1", "covered": True, "evidence": ""}]}, "")
+        ]
+    )
+    result = asyncio.run(ContextRecall(llm).score("q", "a", ["ctx"], "truth"))
+    assert result["score"] == 0.0
+    assert result["points"][0]["reason"] == "标记为覆盖但未给出可引用的原文证据"
 
 
 def test_context_recall_without_ground_truth_returns_none():

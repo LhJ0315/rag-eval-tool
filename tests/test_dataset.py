@@ -2,7 +2,7 @@
 from collections import Counter
 from pathlib import Path
 
-from ragas_eval.dataset import load_dataset
+from ragas_eval.dataset import load_dataset, samples_from_report
 
 DATASET = Path(__file__).resolve().parents[1] / "data" / "eval_dataset.json"
 DIFFICULTY_TAGS = {"normal", "boundary", "adversarial"}
@@ -43,3 +43,33 @@ def test_ground_truths_are_not_bare_yes_no():
     dataset = load_dataset(DATASET)
     for sample in dataset:
         assert sample["ground_truth"].strip().lower() not in {"yes", "no"}
+
+
+def test_samples_from_report_preserves_rerun_inputs():
+    report = {
+        "detailed_results": [
+            {
+                "question": "q1",
+                "answer": "a1",
+                "contexts": ["c1", "c2"],
+                "ground_truth": "g1",
+                "tags": ["normal", "policy"],
+            }
+        ]
+    }
+    samples = samples_from_report(report)
+    assert samples == [
+        {
+            "question": "q1",
+            "answer": "a1",
+            "contexts": ["c1", "c2"],
+            "ground_truth": "g1",
+            "tags": ["normal", "policy"],
+        }
+    ]
+    try:
+        samples_from_report({"detailed_results": []})
+    except ValueError as exc:
+        assert "detailed_results" in str(exc)
+    else:
+        raise AssertionError("空报告应拒绝重判")

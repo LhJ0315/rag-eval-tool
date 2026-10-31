@@ -226,6 +226,7 @@ class EvaluationEngine:
         html: bool = True,
         threshold: float = 0.6,
         checkpoint_dir: str | Path | None = None,
+        metadata_extra: dict | None = None,
     ) -> dict:
         if not dataset:
             raise ValueError("数据集为空")
@@ -302,6 +303,9 @@ class EvaluationEngine:
             "samples": len(dataset),
             "resumed_samples": len(completed),
             "metrics": list(self.metrics),
+            "metric_versions": {
+                name: getattr(metric, "version", "v1") for name, metric in self.metrics.items()
+            },
             "max_concurrency": self.max_concurrency,
             "sampling": {
                 "runs_per_metric": self.samples,
@@ -320,6 +324,8 @@ class EvaluationEngine:
                 "estimated_cost": self.client.estimated_cost(),
             },
         }
+        if metadata_extra:
+            metadata.update(metadata_extra)
         report = {
             "metadata": metadata,
             "summary": summary,
