@@ -26,17 +26,18 @@
 | P3-6 分层评测 | 数据集支持难度 + 领域标签，报告按标签聚合；主集扩至 41 条中英双语（25 normal / 8 boundary / 8 adversarial），含边界、注入、虚假前提等场景 |
 | P2-6 接入真实 RAG API | `scripts/run_dify_system.py` 按标签路由到 Dify Chat App，采集回答与 `retriever_resources`；已完成 Dify 1.18 + BGE-M3 的 41 条端到端评测 |
 | 检索深度诊断 | 零成本 hit-testing 扫描 top_k=4/6/8/10：policy 覆盖率 0.652/0.735/0.752/0.802（k=6 后增幅收窄），hotpotqa 0.405/0.565/0.715/0.800；结合证据排名复核拒答原因（生成侧 1、k 受限 2、召回不到 1、上下文噪声 1） |
-| top_k 消融 | hotpotqa 20 条补跑 k=8/10：k=8 最佳（CR 0.925→0.975，严格拒答 4→2，AR +0.058；F 按拒答口径为 0.984→1.000，已达饱和），k=10 的 F/CR 持平但 AR 回落；合并调优口径 F 0.9955（37 有效、4 跳过）/ AR 0.675 / CP 0.821 / CR 0.963 |
+| top_k 消融 | hotpotqa 20 条补跑 k=8/10：k=8 最佳（CR 0.925→0.975，严格拒答 4→2，AR +0.058；F 按拒答口径为 0.984→1.000，已达饱和），k=10 的 F/CR 持平但 AR 回落；消融结论已验证，原先按领域拼接的合并口径已弃用 |
+| 单次端到端 k=8 全量 | 2026-10-31 以 policy k=4 + hotpotqa k=8 一次跑完 41 条：F 1.000（37 有效/4 跳过）/ AR 0.656 / CP 0.821 / CR 0.963，相对参考答基线 +0.017 / +0.154 / +0.210 / -0.004；hotpotqa 子集（F 1.000、AR 0.576、CP 0.733、CR 0.975）与 k=8 消融在 judge 噪声内一致；报告 `results/system_dify_v1_k8hot/eval_report_20261031_154814_final.json`。Guns N' Roses 在 CR=1.0 时复跑又拒答，标为生成侧不稳定 |
 | 数据修复 | 修正 2 条坏参考答（Random House、Brown State 的 country/county）、1 条无依据表述（实习生答案中的「外包人员」）、3 条对抗参考答（年假满 10 年、报销 15 个工作日、病假天数）；参考答基线 F 由 0.867 升至 0.984（拒答口径重判后 0.983，1 条纯拒答跳过） |
 | 数据去重与对抗改造 | 3 组同题 normal/adversarial 改为同主题「直接提问 vs 虚假前提」对照；新增题目唯一性与 normal 参考答非拒答测试 |
 | yes/no GT 修复 | 5 道 HotpotQA yes/no 题的 GT 由单字扩写为事实句，同步派生系统数据；只重判受影响 CR，基线 0.870→0.967、系统 0.817→0.939、hotpotqa k=8 0.775→0.975；新增 GT 非单字测试（共 35 项） |
 | P1-5 多次采样 | `--samples N`：首轮 T=0、其余按 `SAMPLE_TEMPERATURE`（默认 0.7），样本取均值与总体σ，汇总输出 `sampling_std`；非 0 温度绕过缓存保证独立采样；单次有效样本 σ 记 N/A，汇总记录可估样本与缺次；hotpotqa 20 条实测均值 F 0.974（16 有效/4 跳过）/ AR 0.503 / CP 0.749 / CR 0.925，sampling_std ≤0.055 |
-| 拒答口径与采样可诊断性 | 新增句级拒答识别：纯拒答的 Faithfulness 记 `skipped=True`，排除均值与 `failed_count`；部分拒答先过滤元陈述再验证剩余事实；聚合层记录 `sample_reasons`、`skipped_count`、`skipped_draws`；HTML 报告可逐次展开采样理由。重判 5 份报告：基线 F 0.983（40/1 跳过）、系统 0.988（35/6）、hotpotqa k4 0.984（16/4）、k8/k10 1.000（18/2）、采样 F 0.974/σ 0.015；F 采样方差由 0.050 降至 0.015，此前系统 F 低 0.095 的结论被证伪 |
+| 拒答口径与采样可诊断性 | 新增句级拒答识别：纯拒答的 Faithfulness 记 `skipped=True`，排除均值与 `failed_count`；部分拒答先过滤元陈述再验证剩余事实；聚合层记录 `sample_reasons`、`skipped_count`、`skipped_draws`；HTML 报告可逐次展开采样理由。重判 5 份报告：基线 F 0.983（40/1 跳过）、旧 k=4 系统 0.988（35/6）、hotpotqa k4 0.984（16/4）、k8/k10 1.000（18/2）、采样 F 0.974/σ 0.015；F 采样方差由 0.050 降至 0.015，此前系统 F 低 0.095 的结论被证伪 |
 
 ## 待完成
 
 - **P0-1 吊销历史 Key**：源码中的硬编码 Key 已清除，但仍需到火山引擎控制台**吊销已泄露的 Key**（控制台操作，无法在代码里完成）
 - **P1-6 人工金标校准**：抽 20–30 条人工打分，计算 Spearman / Cohen's Kappa
 - **P3-5 本地 judge 验证**：Ollama / vLLM 的 OpenAI 兼容接口已可用，尚未实测
-- **检索消融后续**：k=8 已验证为 hotpotqa 最佳点；如需单次端到端口径，可把 hotpotqa 默认 top_k 改为 8 后重跑全量（judge 约 270k tokens），否则 README 中的调优数字按两次运行合并引用
+- **生成稳定性复测**：k=8 下 Guns N' Roses 在全量复跑中由可答退回纯拒答（CR=1.0），可用 `--samples 3` 量化生成侧不稳定；Big Stone Gap 仍是召回漏检，需换 embedding/rerank 或补语料后再验证
 - **数据集扩充**：主评测集 41 条（25 normal / 8 boundary / 8 adversarial）；英文侧继续扩到 100–200 条并记录版本

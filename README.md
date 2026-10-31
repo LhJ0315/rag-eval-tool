@@ -126,37 +126,40 @@ HTML 报告会按标签聚合指标，最差样本列表带层标签，便于区
 ```bash
 # 1. 生成系统输出（41/41，调用失败会记录并单独报告）
 python scripts/run_dify_system.py --dataset data/eval_dataset.json \
-  --output data/system_dify_v1.json --apps-file /path/to/dify-apps.json
+  --output data/system_dify_v1_k8hot.json --apps-file /path/to/dify-apps.json
 
 # 2. 对系统输出跑四指标
-python -m ragas_eval run --dataset data/system_dify_v1.json \
-  --system-version dify-1.18.0-bge-m3-top4 --output-dir results/system_dify_v1
+python -m ragas_eval run --dataset data/system_dify_v1_k8hot.json \
+  --system-version dify-1.18.0-bge-m3-policy4-hotpotqa8 --output-dir results/system_dify_v1_k8hot
 ```
 
 `--apps-file` 放在仓库外，内容为 `{"base_url": "http://localhost:8080", "apps": {"policy": {"api_key": "...", "app_id": "..."}, "hotpotqa": {...}}}`，API Key 不进版本库。
 
-实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、`top_k=4`、无 rerank；每个领域一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。
+实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、无 rerank；policy 与 hotpotqa 各一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。2026-10-31 的单次端到端跑批使用 **policy `top_k=4` + hotpotqa `top_k=8`**，旧的全量 k=4 结果保留作对照。
 
-同一 judge（`deepseek-v4-pro-0813`）重判后的对比：
+同一 judge（`deepseek-v4-pro-0813`）判分后的对比（新系统报告：`results/system_dify_v1_k8hot/eval_report_20261031_154814_final.json`）：
 
-| 指标 | 数据集参考答基线 | Dify 系统 | 差值 | 有效样本（基线/系统） |
-|---|---|---|---|---|
-| Faithfulness | 0.983 | 0.988 | +0.005 | 40 / 35（跳过 1 / 6） |
-| Answer Relevancy | 0.502 | 0.647 | +0.145 | 41 / 41 |
-| Context Precision | 0.611 | 0.819 | +0.208 | 40 / 41 |
-| Context Recall | 0.967 | 0.939 | -0.028 | 41 / 41 |
+| 指标 | 参考答基线 | 旧 Dify k=4 | 新 Dify（policy 4 + hotpotqa 8） | 新-基线 | 有效样本（基线/旧/新） |
+|---|---|---|---|---|---|
+| Faithfulness | 0.983 | 0.988 | 1.000 | +0.017 | 40 / 35 / 37（跳过 1 / 6 / 4） |
+| Answer Relevancy | 0.502 | 0.647 | 0.656 | +0.154 | 41 / 41 / 41 |
+| Context Precision | 0.611 | 0.819 | 0.821 | +0.210 | 40 / 41 / 41 |
+| Context Recall | 0.967 | 0.939 | 0.963 | -0.004 | 41 / 41 / 41 |
 
 - 参考答基线使用数据集的参考答与参考上下文（参考答均为修正后的正确答案；零上下文的宠物题 CP 无法计算，不计入均值）。参考上下文含 HotpotQA 干扰段，因此基线的 Context Precision 偏低，不能当作检索上界。
-- 系统答案更短、更贴问题，Answer Relevancy 与 Context Precision 明显更高。Faithfulness 的均值只差 0.005，且两侧有效样本不同：系统有 6 条纯拒答被跳过、基线只有 1 条。对 35 条两侧都有效的样本做配对，系统 1 胜 32 平 2 负，平均差 -0.002，即系统与基线在可作答样本上的忠实度基本持平；此前「系统低 0.095、生成侧过度推断」的结论，主要是把英文拒答句误当成 claim 后随机判 0 造成的假差距，不是真实的生成缺陷。基线的 1 条跳过来自「宠物上班」边界题——参考答本身就是「根据现有信息无法回答」；系统的 6 条中 4 条是 hotpotqa 检索拒答、2 条是 policy 拒答（同一道宠物题 + 病假题）。
-- Context Recall 低 0.028，来自 hotpotqa 检索漏段：Vermont 在 k=4 未召回会议段落，Big Stone Gap 的 Greenwich Village 始终召回不到；policy 两侧都接近满分。Context Precision 配对（40 条可配）为 19 胜 18 平 3 负，平均 +0.228。
-- 2026-10-30 数据修订：5 道 HotpotQA yes/no 题的 `ground_truth` 由单字扩写为事实句（`answer` 不变），Context Recall 不再因单字 GT 抖动。这使 CR 在此前报告基础上整体上移（基线 0.870→0.967、系统 0.817→0.939），旧报告的 CR 不可与新报告直接比较。
-- hotpotqa 20 题在 k=4 下有 5 题宽口径拒答：Animorphs、Guns N' Roses、Vermont、Big Stone Gap、2014 S/S。Brown State 原题的 country/county 表述已修正，修正后 k=4 即可答出 9,984，不再计入拒答。
+- Faithfulness 的 1.000 是 37 条可作答样本全部 1.0，已饱和，不代表回答质量完美。4 条跳过为 hotpotqa 2 条（Big Stone Gap、Guns N' Roses）与 policy 2 条（带宠物、带薪病假）。对 37 条公共样本配对，新系统 1 胜 36 平 0 负，平均差 +0.009，可作答样本上与基线基本持平；旧 k=4 的 6 条跳过含 4 条 hotpotqa 拒答、2 条 policy 拒答。此前「系统低 0.095、生成侧过度推断」的结论，主要是把英文拒答句误当成 claim 后随机判 0 造成的假差距，不是真实的生成缺陷。
+- Answer Relevancy 新系统 0.656，相对基线 +0.154（26 胜 6 平 9 负，+0.1538），相对旧 k=4 仅 +0.009（14 胜 13 平 14 负，+0.0089）。系统答案更短、更贴问题，而参考答信息冗余；绝对值仍偏低，主要被 hotpotqa 拒答与部分拒答题拉低（hotpotqa 组 0.576、normal 组 0.603）。
+- Context Precision 0.821，相对基线 +0.210（40 条可配 19 胜 18 平 3 负，+0.2301）；相对旧 k=4 +0.002（2 胜 36 平 3 负，+0.0016），policy 部分基本不变。
+- Context Recall 0.963，相对基线 -0.004（41 条 1 胜 38 平 2 负，-0.0041），可视为持平，但差异构成不同：Big Stone Gap 仍为 0.5（Greenwich Village 始终召回不到），带薪病假为 0（检索无相关段且拒答，基线 0.667）；宠物题因基线参考上下文为空（基线 0）而系统为 1.0，抵消了大部分差距。Vermont 在 k=8 已召回（k=4 时所需会议段落排第 8）。
+- 新系统与旧 k=4 的差值为 +0.012 / +0.009 / +0.002 / +0.024。本轮 policy 与 hotpotqa 答案都重新生成，差值包含生成随机性，不完全是 top_k 的因果效应；k=4→k=8 的消融结论以同问题集、同基线的下节配对表为准。
+- 2026-10-30 数据修订：5 道 HotpotQA yes/no 题的 `ground_truth` 由单字扩写为事实句（`answer` 不变），Context Recall 不再因单字 GT 抖动。这使 CR 在此前报告基础上整体上移（基线 0.870→0.967、旧 k=4 系统 0.817→0.939），旧报告的 CR 不可与新报告直接比较。
+- 旧 k=4 系统在 hotpotqa 20 题中有 5 题宽口径拒答：Animorphs、Guns N' Roses、Vermont、Big Stone Gap、2014 S/S。Brown State 原题的 country/county 表述已修正，修正后 k=4 即可答出 9,984，不再计入拒答。
   - Animorphs：正面证据排第 1，拒答属于生成/提示词问题；
-  - Guns N' Roses：直接证据（1999 年宣传单曲）排第 9，需要 `top_k≥10`；
+  - Guns N' Roses：直接证据（1999 年宣传单曲）排第 9，严格覆盖需要 `top_k≥10`；k=8 消融中曾作答，但全量复跑又拒答，属于生成/排序共同导致的不稳定；
   - Vermont：所需会议段落排第 8，`top_k=4` 漏掉，`top_k≥8` 可覆盖；
   - Big Stone Gap：所需事实（导演常驻的 Greenwich Village）在 top-10 内完全没有召回，属于语料/embedding 漏检；
-  - 2014 S/S：k=4 只答出 YG Entertainment 并拒绝回答成立者，k=8/10 退化为完整拒答。
-- 结论：检索深度不是唯一瓶颈。k=4 的 5 题宽口径拒答中，k=8 让 Animorphs、Guns N' Roses、Vermont 转为回答，但 Animorphs 的证据本来排第 1（生成侧问题）；真正依赖加大 k 的是 Vermont（k≥8）和 Guns N' Roses（k≥10）。Big Stone Gap 在 k=10 仍召回不到，2014 S/S 在 k=8/10 因上下文噪声退化为完整拒答。因此只对 hotpotqa 子集补跑 k=8/10 验证（见下），没有对全量 41 条做消融。
+  - 2014 S/S：k=4 只答出 YG Entertainment 并拒绝回答成立者，k=8/10 曾退化为完整拒答。
+- k=8 的消融运行让 Animorphs、Guns N' Roses、Vermont 转为回答，但 2026-10-31 的全量复跑中 Guns N' Roses 在 CR=1.0（证据已召回）的情况下又变为纯拒答，说明该题是生成侧不稳定，不能归因于检索深度；Animorphs、Vermont 复跑保持可答，Big Stone Gap 仍召回不到。因此 k=8 是检索深度上的合理拐点，但不保证生成稳定。
 - 检索诊断见 `results/system_dify_v1/retrieval_diagnostic.json`（39/41 至少召回一段参考证据）与 `results/system_dify_v1/topk_probe.json`。覆盖扫描（hit-testing，不调用 LLM；参考段落被结果以 Jaccard≥0.5 命中即算覆盖）：
 
 | 领域 | top_k=4 | top_k=6 | top_k=8 | top_k=10 |
@@ -164,7 +167,7 @@ python -m ragas_eval run --dataset data/system_dify_v1.json \
 | policy 平均参考段落覆盖率 | 0.652 | 0.735 | 0.752 | 0.802 |
 | hotpotqa 平均参考段落覆盖率 | 0.405 | 0.565 | 0.715 | 0.800 |
 
-policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升；hotpotqa 随 k 单调上升，但新增的多是次要段落，不足以扭转拒答。
+policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升；hotpotqa 随 k 单调上升。k=8 的覆盖增益能救回 Vermont 这类漏段题，但 Big Stone Gap 在 top-10 外仍未覆盖，Guns N' Roses 则受生成稳定性影响，因此覆盖率不是回答质量的唯一决定因素。
 
 ### top_k 消融（hotpotqa 20 条）
 
@@ -178,13 +181,14 @@ policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升
 
 （Faithfulness 按拒答口径跳过纯拒答：k=4 有效 16 条、跳过 4 条；k=8/k=10 有效 18 条、跳过 2 条。）
 
-- k=8 是拐点：Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Context Recall +0.050 来自 Vermont（0→1），Big Stone Gap 仍为 0.5，其余题在 k=4 已覆盖。Context Precision 基本不变（+0.003）。
+- k=8 是拐点：该次消融中 Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Context Recall +0.050 来自 Vermont（0→1），Big Stone Gap 仍为 0.5，其余题在 k=4 已覆盖。Context Precision 基本不变（+0.003）。但全量复跑时 Guns N' Roses 又拒答（见上），说明单次生成对边界题有随机性。
 - Faithfulness 在 k=8/k=10 已饱和：18 条可作答样本全部为 1.0，k=4 的 0.984 也只有一条 0.75。此前「k=8 让 Faithfulness +0.120」并非检索改善了事实支撑，而是 k=4 的纯拒答被随机判 0/0.333；改用拒答跳过口径后，15 条两边都可判定的公共样本配对平均仅 +0.017（1 胜 14 平 0 负）。
 - k=10 与 k=8 同为 F 1.000、CR 0.975，但 Answer Relevancy 回落到 0.519；2014 S/S 从部分拒答变成完整拒答，Big Stone Gap 仍召回不到。多出的 2 段上下文只增加噪声和成本，因此 k=8 仍是该知识库的最佳点。
 - 逐样本配对（k=8 vs k=4，20 条）：Context Recall 1 胜 0 负 19 平；Answer Relevancy 8 胜 6 负 6 平；Context Precision 2 胜 3 负 15 平；Faithfulness 在 15 条公共可判样本上 1 胜 0 负 14 平。judge 噪声明显，不宜过度解读单个指标的小幅变化。
 - 成本：Dify 生成 token 19,081 / 29,264 / 34,548。k=8、k=10 首轮 judge 用量分别约 162k / 145k tokens；yes/no GT 扩写后只重判 5 条 CR（k=8 7.9k、k=10 10.0k tokens），其余命中缓存；拒答口径重判只涉及 k=8/k=10 各 2 条纯拒答，零额外调用。
 - 工程结论：该知识库与模型组合下 hotpotqa 的最佳点是 k=8，继续加到 10 不带来质量收益。另需注意 Dify 1.18 实际生效的检索深度取 app 的 `dataset_configs.top_k` 与数据集 `retrieval_model.top_k` 的较小值，只改数据集不会生效。
-- 合并两次已判分运行（policy k=4 + hotpotqa k=8），调优后的 41 条总体为 Faithfulness 0.9955（37 条有效、4 条拒答跳过）/ Answer Relevancy 0.675 / Context Precision 0.821 / Context Recall 0.963；相对参考答基线为 +0.012 / +0.173 / +0.210 / -0.004。该行由两次运行按领域拼接，不是单次端到端跑批，引用时需说明口径。
+- 单次端到端复跑（2026-10-31，policy k=4 + hotpotqa k=8，41 条一次生成）：Faithfulness 1.000（37 有效、4 跳过）/ Answer Relevancy 0.656 / Context Precision 0.821 / Context Recall 0.963，相对参考答基线 +0.017 / +0.154 / +0.210 / -0.004。hotpotqa 子集为 F 1.000（18 有效、2 跳过）/ AR 0.576 / CP 0.733 / CR 0.975，与上表 k=8 首轮（0.572 / 0.732 / 0.975）在 judge 噪声内一致；文档不再使用按领域拼接的合并口径。
+- 成本：本轮 Dify 生成 41,277 tokens（41 次调用，平均 4.3s/条）；judge 主判分 145,849 tokens（107 次调用、329 次缓存命中、2 次重试），补判 14,915 tokens，判分耗时 862.4s。缓存命中部分不计费。
 
 ## 指标口径
 
