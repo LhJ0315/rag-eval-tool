@@ -100,6 +100,49 @@ def test_html_shows_sampling_config_and_std():
     assert "采样缺次 1 条/1 次" in html
 
 
+def test_html_shows_sampling_reasons_and_skipped():
+    report = {
+        "metadata": {
+            "samples": 1,
+            "judge_model": "test",
+            "sampling": {"runs_per_metric": 2},
+        },
+        "summary": {
+            "faithfulness": {
+                **_metric_block(0.5),
+                "skipped_count": 1,
+            },
+            "context_recall": {**_metric_block(None), "skipped_count": 1},
+        },
+        "detailed_results": [
+            {
+                "question": "q1",
+                "answer": "a",
+                "contexts": [],
+                "metrics": {
+                    "faithfulness": {
+                        "score": 0.5,
+                        "reason": "first",
+                        "sample_scores": [1.0, 0.0],
+                        "sample_reasons": ["first", "second"],
+                        "score_std": 0.5,
+                    },
+                    "context_recall": {
+                        "score": None,
+                        "skipped": True,
+                        "reason": "纯拒答",
+                    },
+                },
+            }
+        ],
+    }
+    page = render_html(report)
+    assert "采样 [1.0, 0.0] · σ 0.5" in page
+    assert "每次采样理由" in page
+    assert "second" in page
+    assert "跳过" in page
+
+
 def test_html_hides_tag_section_when_untagged_only():
     report = {
         "metadata": {"samples": 1},

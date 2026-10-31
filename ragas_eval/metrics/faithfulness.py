@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """忠实度（Faithfulness）：衡量回答是否基于上下文，有无幻觉。"""
+from ..refusal import filter_refusal_sentences, is_refusal_sentence
 from .base import BaseMetric
 
 
@@ -17,10 +18,19 @@ class Faithfulness(BaseMetric):
     ) -> dict:
         context_text = "\n\n".join(contexts)
 
+        cleaned_answer, removed_sentences = filter_refusal_sentences(answer)
+        if removed_sentences and not cleaned_answer.strip():
+            return self.skipped(
+                "回答为纯拒答，没有可验证的事实性陈述，忠实度不适用",
+                refusal=True,
+                claims=[],
+                filtered_sentences=removed_sentences,
+            )
+
         extract_prompt = f"""请从以下回答中提取所有可独立验证的陈述性事实语句（Claim）。
 
 回答内容：
-{answer}
+{cleaned_answer}
 
 请输出 JSON 对象，格式：{{"claims": ["陈述1", "陈述2"]}}。
 只输出 JSON，不要输出解释。"""
@@ -30,7 +40,17 @@ class Faithfulness(BaseMetric):
             return self.failure("陈述提取结果不是合法 JSON", raw=raw[:500])
 
         claims = [str(claim).strip() for claim in claims if str(claim).strip()]
+        filtered_claims = [claim for claim in claims if is_refusal_sentence(claim)]
+        claims = [claim for claim in claims if not is_refusal_sentence(claim)]
         if not claims:
+            if removed_sentences or filtered_claims:
+                return self.skipped(
+                    "过滤拒答/元陈述后没有可验证的事实性陈述，忠实度不适用",
+                    refusal=True,
+                    claims=[],
+                    filtered_sentences=removed_sentences,
+                    filtered_claims=filtered_claims,
+                )
             return {"score": 1.0, "reason": "回答中没有可验证的陈述", "claims": []}
 
         numbered = "\n".join(f"{i + 1}. {claim}" for i, claim in enumerate(claims))
@@ -61,11 +81,23 @@ class Faithfulness(BaseMetric):
         )
         if unsupported_claims:
             reason += "。不支持的陈述：" + "；".join(unsupported_claims[:3])
+        if removed_sentences or filtered_claims:
+            parts = []
+            if removed_sentences:
+                parts.append(f"{len(removed_sentences)} 句拒答/元陈述")
+            if filtered_claims:
+                parts.append(f"{len(filtered_claims)} 条元陈述 claim")
+            reason += "（已过滤" + "、".join(parts) + "）"
 
-        return {
+        result = {
             "score": round(score, 3),
             "reason": reason,
             "total_claims": len(claims),
             "supported_claims": sum(flags),
             "unsupported_claims": unsupported_claims,
         }
+        if removed_sentences:
+            result["filtered_sentences"] = removed_sentences
+        if filtered_claims:
+            result["filtered_claims"] = filtered_claims
+        return result

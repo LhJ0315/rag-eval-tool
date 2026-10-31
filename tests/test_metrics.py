@@ -90,6 +90,88 @@ def test_context_recall_without_ground_truth_returns_none():
     assert result["score"] is None
 
 
+def test_faithfulness_skips_pure_refusal_without_llm():
+    llm = FakeLLM()
+    result = asyncio.run(
+        Faithfulness(llm).score(
+            "q", "I cannot find it in the knowledge base.", ["ctx"]
+        )
+    )
+    assert result["score"] is None
+    assert result["skipped"] is True
+    assert result["refusal"] is True
+    assert result["filtered_sentences"] == ["I cannot find it in the knowledge base."]
+    assert llm.json_calls == []
+
+
+def test_faithfulness_filters_meta_sentence_before_extraction():
+    answer = (
+        "The knowledge base does not explicitly state who formed the group; "
+        "it identifies the album as by WINNER and released by YG Entertainment."
+    )
+    llm = FakeLLM(
+        json_responses=[
+            (
+                {
+                    "claims": [
+                        "WINNER released the album through YG Entertainment.",
+                        "The knowledge base does not explicitly state who formed the group.",
+                    ]
+                },
+                "",
+            ),
+            ({"supported": [True]}, ""),
+        ]
+    )
+    result = asyncio.run(Faithfulness(llm).score("q", answer, ["ctx"]))
+    assert result["score"] == 1.0
+    assert result["total_claims"] == 1
+    assert len(result["filtered_sentences"]) == 1
+    assert len(result["filtered_claims"]) == 1
+    assert "WINNER" in llm.json_calls[0]
+    assert "does not explicitly state" not in llm.json_calls[0]
+
+
+def test_faithfulness_skips_when_only_meta_claims_remain():
+    answer = (
+        "The knowledge base does not state who formed the group; "
+        "it identifies the album as by WINNER."
+    )
+    llm = FakeLLM(
+        json_responses=[
+            (
+                {
+                    "claims": [
+                        "The knowledge base does not state who formed the group."
+                    ]
+                },
+                "",
+            )
+        ]
+    )
+    result = asyncio.run(Faithfulness(llm).score("q", answer, ["ctx"]))
+    assert result["score"] is None
+    assert result["skipped"] is True
+    assert result["refusal"] is True
+    assert len(llm.json_calls) == 1
+
+
+def test_faithfulness_keeps_negative_answer():
+    answer = (
+        "No, not both are described as used for real estate. "
+        "Random House Tower is used as headquarters."
+    )
+    llm = FakeLLM(
+        json_responses=[
+            ({"claims": ["Random House Tower is used as headquarters."]}, ""),
+            ({"supported": [True]}, ""),
+        ]
+    )
+    result = asyncio.run(Faithfulness(llm).score("q", answer, ["ctx"]))
+    assert result["score"] == 1.0
+    assert "filtered_sentences" not in result
+
+
 def test_faithfulness_passes_temperature_to_llm():
     llm = FakeLLM(
         json_responses=[

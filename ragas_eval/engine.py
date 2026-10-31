@@ -114,44 +114,71 @@ class EvaluationEngine:
             return attempts[0]
 
         sample_scores = []
+        sample_reasons = []
         numeric = []
+        skipped = 0
+        failed = 0
         base = None
         for attempt in attempts:
             score = attempt.get("score")
             valid = isinstance(score, (int, float)) and not isinstance(score, bool)
-            sample_scores.append(round(float(score), 3) if valid else None)
             if valid:
                 numeric.append(float(score))
                 if base is None:
                     base = attempt
+            elif attempt.get("skipped"):
+                skipped += 1
+            else:
+                failed += 1
+            sample_scores.append(round(float(score), 3) if valid else None)
+            sample_reasons.append(str(attempt.get("reason", "")))
 
         if not numeric:
-            reasons = "；".join(str(item.get("reason", "未知错误")) for item in attempts)
-            return {
+            all_skipped = skipped == len(attempts)
+            if all_skipped:
+                reason = f"{len(attempts)} 次采样均为拒答/不适用，指标跳过"
+            elif skipped:
+                reason = (
+                    f"{len(attempts)} 次采样均无有效分数"
+                    f"（{failed} 次失败，{skipped} 次跳过）"
+                )
+            else:
+                reasons = "；".join(sample_reasons)
+                reason = f"{len(attempts)} 次采样全部失败：{reasons}"
+            result = {
                 "score": None,
-                "reason": f"{len(attempts)} 次采样全部失败：{reasons}"[:500],
+                "reason": reason[:500],
                 "sample_scores": sample_scores,
+                "sample_reasons": sample_reasons,
                 "score_std": None,
                 "samples_ok": 0,
-                "samples_failed": len(attempts),
+                "samples_failed": failed,
+                "samples_skipped": skipped,
             }
+            if all_skipped:
+                result["skipped"] = True
+                result["refusal"] = True
+            return result
 
         mean = statistics.fmean(numeric)
         std = statistics.pstdev(numeric) if len(numeric) > 1 else None
         std_text = (
             f"σ {std:.3f}" if std is not None else "仅 1 次有效，无法估计 σ"
         )
+        skipped_text = f"，{skipped} 次跳过" if skipped else ""
         aggregated = dict(base)
         aggregated.update(
             {
                 "score": round(mean, 3),
                 "sample_scores": sample_scores,
+                "sample_reasons": sample_reasons,
                 "score_std": round(std, 3) if std is not None else None,
                 "samples_ok": len(numeric),
-                "samples_failed": len(attempts) - len(numeric),
+                "samples_failed": failed,
+                "samples_skipped": skipped,
                 "reason": (
                     f"{base.get('reason', '')}"
-                    f"（{len(numeric)}/{len(attempts)} 次采样成功，均值 {mean:.3f}，{std_text}）"
+                    f"（{len(numeric)}/{len(attempts)} 次采样成功，均值 {mean:.3f}，{std_text}{skipped_text}）"
                 ),
             }
         )
@@ -359,6 +386,8 @@ class EvaluationEngine:
             per_sample_stds = []
             partial_failures = 0
             failed_draws = 0
+            skipped_count = 0
+            skipped_draws = 0
             for result in results:
                 cell = result.get("metrics", {}).get(metric, {})
                 score = cell.get("score")
@@ -367,6 +396,10 @@ class EvaluationEngine:
                     std = cell.get("score_std")
                     if isinstance(std, (int, float)) and not isinstance(std, bool):
                         per_sample_stds.append(float(std))
+                    skipped_draws += cell.get("samples_skipped", 0) or 0
+                elif cell.get("skipped"):
+                    skipped_count += 1
+                    skipped_draws += cell.get("samples_skipped", 1) or 1
                 ok = cell.get("samples_ok")
                 failed = cell.get("samples_failed")
                 if isinstance(failed, int) and failed > 0:
@@ -380,14 +413,16 @@ class EvaluationEngine:
                     "max_score": round(max(scores), 3),
                     "std_dev": round(statistics.pstdev(scores), 3),
                     "sample_count": len(scores),
-                    "failed_count": len(results) - len(scores),
+                    "failed_count": len(results) - len(scores) - skipped_count,
                 }
             else:
                 summary[metric] = {
                     "avg_score": None,
                     "sample_count": 0,
-                    "failed_count": len(results),
+                    "failed_count": len(results) - skipped_count,
                 }
+            if skipped_count:
+                summary[metric]["skipped_count"] = skipped_count
             if self.samples > 1:
                 summary[metric].update(
                     {
@@ -401,6 +436,8 @@ class EvaluationEngine:
                         "failed_draws": failed_draws,
                     }
                 )
+                if skipped_draws:
+                    summary[metric]["skipped_draws"] = skipped_draws
         return summary
 
     def _calculate_tag_summary(self, results: list[dict]) -> dict:
@@ -450,6 +487,8 @@ class EvaluationEngine:
                 )
             if data.get("failed_draws"):
                 sampling += f" 采样缺次={data['failed_draws']}"
+            if data.get("skipped_count"):
+                sampling += f" 跳过={data['skipped_count']}"
             logger.info(
                 "%-20s avg=%s std=%s%s (样本 %d，失败 %d)",
                 metric,

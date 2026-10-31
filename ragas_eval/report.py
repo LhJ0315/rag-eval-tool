@@ -182,11 +182,15 @@ def _render_card(name: str, data: dict) -> str:
             f" · 采样缺次 {data['partial_failures']} 条"
             f"/{data.get('failed_draws', '?')} 次"
         )
+    skipped = (
+        f" · 跳过 {data['skipped_count']}" if data.get("skipped_count") else ""
+    )
     sub = (
         f"min {data.get('min_score')} · max {data.get('max_score')} · "
         f"std {data.get('std_dev')}"
         + sampling
         + f" · 有效 {data.get('sample_count')} · 失败 {data.get('failed_count')}"
+        + skipped
     )
     return (
         f'<div class="metric"><div><div class="name">{html.escape(METRIC_LABELS.get(name, name))}</div>'
@@ -206,7 +210,12 @@ def _render_tags(tag_summary: dict) -> str:
         cells = []
         for name in metrics:
             data = summary.get(name, {})
-            count = max(count, data.get("sample_count", 0) + data.get("failed_count", 0))
+            count = max(
+                count,
+                data.get("sample_count", 0)
+                + data.get("failed_count", 0)
+                + data.get("skipped_count", 0),
+            )
             avg = data.get("avg_score")
             cells.append(f"<td>{'—' if avg is None else f'{avg:.2f}'}</td>")
         rows.append(
@@ -240,6 +249,40 @@ def _render_distribution(metric: str, results: list[dict]) -> str:
     )
 
 
+def _render_metric_row(name: str, item: dict) -> str:
+    score = item.get("score")
+    if item.get("skipped"):
+        score_text = "N/A<br><small>跳过</small>"
+    elif score is None:
+        score_text = "N/A"
+    else:
+        score_text = str(score)
+        sample_scores = item.get("sample_scores")
+        if sample_scores:
+            score_text += f"<br><small>采样 {sample_scores}"
+            if item.get("score_std") is not None:
+                score_text += f" · σ {item['score_std']}"
+            if item.get("samples_skipped"):
+                score_text += f" · 跳过 {item['samples_skipped']}"
+            score_text += "</small>"
+
+    reason_text = html.escape(str(item.get("reason", "")))
+    sample_reasons = item.get("sample_reasons")
+    if sample_reasons:
+        entries = "".join(
+            f"<li>{html.escape(str(reason))}</li>" for reason in sample_reasons
+        )
+        reason_text += (
+            "<details><summary>每次采样理由</summary>"
+            f"<ol>{entries}</ol></details>"
+        )
+
+    return (
+        f"<tr><td>{html.escape(METRIC_LABELS.get(name, name))}</td>"
+        f"<td>{score_text}</td><td>{reason_text}</td></tr>"
+    )
+
+
 def _render_worst(results: list[dict], limit: int = 10) -> str:
     ranked = []
     for result in results:
@@ -257,9 +300,7 @@ def _render_worst(results: list[dict], limit: int = 10) -> str:
     blocks = []
     for rank, (average, result) in enumerate(ranked[:limit], start=1):
         rows = "".join(
-            f"<tr><td>{html.escape(METRIC_LABELS.get(name, name))}</td>"
-            f"<td>{item.get('score')}</td>"
-            f"<td>{html.escape(str(item.get('reason', '')))}</td></tr>"
+            _render_metric_row(name, item)
             for name, item in result.get("metrics", {}).items()
         )
         contexts = "".join(

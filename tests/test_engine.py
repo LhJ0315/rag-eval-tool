@@ -132,6 +132,100 @@ def test_single_success_draw_has_no_std():
     assert "无法估计 σ" in result["reason"]
 
 
+def test_aggregate_samples_tracks_skip_and_reasons():
+    engine = EvaluationEngine.__new__(EvaluationEngine)
+    result = engine._aggregate_samples(
+        [
+            {"score": None, "skipped": True, "reason": "纯拒答"},
+            {"score": None, "skipped": True, "reason": "纯拒答"},
+        ]
+    )
+    assert result["score"] is None
+    assert result["skipped"] is True
+    assert result["refusal"] is True
+    assert result["samples_skipped"] == 2
+    assert result["samples_failed"] == 0
+    assert result["sample_scores"] == [None, None]
+    assert result["sample_reasons"] == ["纯拒答", "纯拒答"]
+
+
+def test_aggregate_samples_keeps_reasons_for_each_draw():
+    engine = EvaluationEngine.__new__(EvaluationEngine)
+    result = engine._aggregate_samples(
+        [
+            {"score": 0.0, "reason": "first"},
+            {"score": 1.0, "skipped": False, "reason": "second"},
+            {"score": None, "skipped": True, "reason": "refusal"},
+        ]
+    )
+    assert result["score"] == 0.5
+    assert result["sample_scores"] == [0.0, 1.0, None]
+    assert result["sample_reasons"] == ["first", "second", "refusal"]
+    assert result["samples_ok"] == 2
+    assert result["samples_skipped"] == 1
+    assert "1 次跳过" in result["reason"]
+
+
+def test_summary_excludes_skipped_from_failed_count():
+    engine = _engine(CountingMetric(), ".unused")
+    summary = engine._calculate_summary(
+        [
+            {
+                "metrics": {
+                    "counting": {
+                        "score": None,
+                        "skipped": True,
+                        "samples_skipped": 2,
+                    }
+                }
+            },
+            {"metrics": {"counting": {"score": 0.5}}},
+            {"metrics": {"counting": {"score": None, "reason": "timeout"}}},
+        ]
+    )["counting"]
+    assert summary["avg_score"] == 0.5
+    assert summary["sample_count"] == 1
+    assert summary["skipped_count"] == 1
+    assert summary["failed_count"] == 1
+
+
+def test_summary_counts_skipped_draws():
+    settings = Settings(api_key="test", samples=2)
+    engine = EvaluationEngine(
+        settings,
+        client=FakeLLM(settings=settings),
+        metrics={"counting": CountingMetric()},
+        checkpoint_dir=".unused",
+    )
+    summary = engine._calculate_summary(
+        [
+            {
+                "metrics": {
+                    "counting": {
+                        "score": None,
+                        "skipped": True,
+                        "samples_skipped": 2,
+                    }
+                }
+            },
+            {
+                "metrics": {
+                    "counting": {
+                        "score": 0.5,
+                        "score_std": 0.0,
+                        "samples_ok": 2,
+                        "samples_failed": 0,
+                        "samples_skipped": 0,
+                    }
+                }
+            },
+        ]
+    )["counting"]
+    assert summary["skipped_count"] == 1
+    assert summary["skipped_draws"] == 2
+    assert summary["failed_count"] == 0
+
+
 def test_summary_excludes_unestimable_sampling_std(tmp_path):
     settings = Settings(api_key="test", samples=2)
     engine = EvaluationEngine(

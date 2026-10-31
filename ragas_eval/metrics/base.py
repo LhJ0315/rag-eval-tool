@@ -26,6 +26,11 @@ class BaseMetric(ABC):
         """评测失败时返回 score=None，避免默认分污染均值。"""
         return {"score": None, "reason": reason, **extra}
 
+    @staticmethod
+    def skipped(reason: str, **extra) -> dict:
+        """指标不适用时返回 score=None，与调用失败区分。"""
+        return {"score": None, "skipped": True, "reason": reason, **extra}
+
     @abstractmethod
     async def score(
         self,

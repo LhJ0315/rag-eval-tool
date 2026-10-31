@@ -24,8 +24,8 @@ flowchart LR
 - **可靠执行**：`asyncio.Semaphore` 限流、指数退避重试（429/5xx/超时）、60s 超时、JSON 解析失败自动修复一次
 - **断点续跑**：每条样本完成即写入 JSONL，中断后重跑自动跳过已完成样本
 - **响应缓存**：以 `(model, messages, temperature)` 哈希为 key 落盘 SQLite，重复评测不重复计费；非 0 温度的采样请求不落缓存，避免多次采样命中同一响应
-- **失败不污染均值**：任何指标解析失败记 `score=None`，从均值中排除并单独统计失败数
-- **多次采样**：`--samples N` 让每个指标重复评测 N 次，首轮 T=0、其余按 `SAMPLE_TEMPERATURE` 采样，输出样本级均值/σ 与指标级 `sampling_std`
+- **失败与不适用分开统计**：指标解析失败记 `score=None` 并计入 `failed_count`；纯拒答没有事实性陈述，Faithfulness 记 `skipped=True`，不计入均值也不计入失败
+- **多次采样**：`--samples N` 让每个指标重复评测 N 次，首轮 T=0、其余按 `SAMPLE_TEMPERATURE` 采样，输出样本级均值/σ 与指标级 `sampling_std`；每次采样的理由一并落盘，便于定位方差来源
 - **可交付报告**：JSON + 自包含 HTML（雷达图、分数分布、最差样本 Top 10 钻取）
 - **分层评测**：样本可打难度标签（`normal` / `boundary` / `adversarial`）与领域标签（`hotpotqa` / `policy`），报告按标签聚合指标，区分常规质量与边界/对抗表现
 - **A/B 对比**：输出两版 RAG 系统的指标差值，以及逐样本胜/平/负
@@ -139,15 +139,16 @@ python -m ragas_eval run --dataset data/system_dify_v1.json \
 
 同一 judge（`deepseek-v4-pro-0813`）重判后的对比：
 
-| 指标 | 数据集参考答基线 | Dify 系统 | 差值 |
-|---|---|---|---|
-| Faithfulness | 0.984 | 0.889 | -0.095 |
-| Answer Relevancy | 0.502 | 0.647 | +0.145 |
-| Context Precision | 0.611 | 0.819 | +0.208 |
-| Context Recall | 0.967 | 0.939 | -0.028 |
+| 指标 | 数据集参考答基线 | Dify 系统 | 差值 | 有效样本（基线/系统） |
+|---|---|---|---|---|
+| Faithfulness | 0.983 | 0.988 | +0.005 | 40 / 35（跳过 1 / 6） |
+| Answer Relevancy | 0.502 | 0.647 | +0.145 | 41 / 41 |
+| Context Precision | 0.611 | 0.819 | +0.208 | 40 / 41 |
+| Context Recall | 0.967 | 0.939 | -0.028 | 41 / 41 |
 
 - 参考答基线使用数据集的参考答与参考上下文（参考答均为修正后的正确答案；零上下文的宠物题 CP 无法计算，不计入均值）。参考上下文含 HotpotQA 干扰段，因此基线的 Context Precision 偏低，不能当作检索上界。
-- 系统答案更短、更贴问题，Answer Relevancy 与 Context Precision 明显更高；但 Faithfulness 低 0.095，说明生成侧仍会把相邻事实合并成上下文未直接支持的推断。Context Recall 低 0.028，来自 hotpotqa 检索漏段：Vermont 在 k=4 未召回会议段落，Big Stone Gap 的 Greenwich Village 始终召回不到；policy 两侧都接近满分。
+- 系统答案更短、更贴问题，Answer Relevancy 与 Context Precision 明显更高。Faithfulness 的均值只差 0.005，且两侧有效样本不同：系统有 6 条纯拒答被跳过、基线只有 1 条。对 35 条两侧都有效的样本做配对，系统 1 胜 32 平 2 负，平均差 -0.002，即系统与基线在可作答样本上的忠实度基本持平；此前「系统低 0.095、生成侧过度推断」的结论，主要是把英文拒答句误当成 claim 后随机判 0 造成的假差距，不是真实的生成缺陷。基线的 1 条跳过来自「宠物上班」边界题——参考答本身就是「根据现有信息无法回答」；系统的 6 条中 4 条是 hotpotqa 检索拒答、2 条是 policy 拒答（同一道宠物题 + 病假题）。
+- Context Recall 低 0.028，来自 hotpotqa 检索漏段：Vermont 在 k=4 未召回会议段落，Big Stone Gap 的 Greenwich Village 始终召回不到；policy 两侧都接近满分。Context Precision 配对（40 条可配）为 19 胜 18 平 3 负，平均 +0.228。
 - 2026-10-30 数据修订：5 道 HotpotQA yes/no 题的 `ground_truth` 由单字扩写为事实句（`answer` 不变），Context Recall 不再因单字 GT 抖动。这使 CR 在此前报告基础上整体上移（基线 0.870→0.967、系统 0.817→0.939），旧报告的 CR 不可与新报告直接比较。
 - hotpotqa 20 题在 k=4 下有 5 题宽口径拒答：Animorphs、Guns N' Roses、Vermont、Big Stone Gap、2014 S/S。Brown State 原题的 country/county 表述已修正，修正后 k=4 即可答出 9,984，不再计入拒答。
   - Animorphs：正面证据排第 1，拒答属于生成/提示词问题；
@@ -171,27 +172,37 @@ policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升
 
 | top_k | Faithfulness | Answer Relevancy | Context Precision | Context Recall | 严格拒答 | 平均上下文数 |
 |---|---|---|---|---|---|---|
-| 4（基线） | 0.780 | 0.513 | 0.729 | 0.925 | 4/20 | 4 |
-| 8 | 0.900 | 0.572 | 0.732 | 0.975 | 2/20 | 8 |
-| 10 | 0.900 | 0.519 | 0.729 | 0.975 | 2/20 | 10 |
+| 4（基线） | 0.984 | 0.513 | 0.729 | 0.925 | 4/20 | 4 |
+| 8 | 1.000 | 0.572 | 0.732 | 0.975 | 2/20 | 8 |
+| 10 | 1.000 | 0.519 | 0.729 | 0.975 | 2/20 | 10 |
 
-- k=8 是拐点：Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Faithfulness +0.120；Context Recall +0.050 来自 Vermont（0→1），Big Stone Gap 仍为 0.5，其余题在 k=4 已覆盖。Context Precision 基本不变（+0.003）。
-- k=10 与 k=8 同为 F 0.900、CR 0.975，但 Answer Relevancy 回落到 0.519；2014 S/S 从部分拒答变成完整拒答，Big Stone Gap 仍召回不到。多出的 2 段上下文只增加噪声和成本，因此 k=8 仍是该知识库的最佳点。
-- 逐样本配对（k=8 vs k=4，20 条）：Faithfulness 4 胜 1 负 15 平；Context Recall 1 胜 0 负 19 平；Answer Relevancy 8 胜 6 负 6 平；Context Precision 2 胜 3 负 15 平，judge 噪声明显，不宜过度解读单个指标的小幅变化。
-- 成本：Dify 生成 token 19,081 / 29,264 / 34,548。k=8、k=10 首轮 judge 用量分别约 162k / 145k tokens；yes/no GT 扩写后只重判 5 条 CR（k=8 7.9k、k=10 10.0k tokens），其余命中缓存。
+（Faithfulness 按拒答口径跳过纯拒答：k=4 有效 16 条、跳过 4 条；k=8/k=10 有效 18 条、跳过 2 条。）
+
+- k=8 是拐点：Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Context Recall +0.050 来自 Vermont（0→1），Big Stone Gap 仍为 0.5，其余题在 k=4 已覆盖。Context Precision 基本不变（+0.003）。
+- Faithfulness 在 k=8/k=10 已饱和：18 条可作答样本全部为 1.0，k=4 的 0.984 也只有一条 0.75。此前「k=8 让 Faithfulness +0.120」并非检索改善了事实支撑，而是 k=4 的纯拒答被随机判 0/0.333；改用拒答跳过口径后，15 条两边都可判定的公共样本配对平均仅 +0.017（1 胜 14 平 0 负）。
+- k=10 与 k=8 同为 F 1.000、CR 0.975，但 Answer Relevancy 回落到 0.519；2014 S/S 从部分拒答变成完整拒答，Big Stone Gap 仍召回不到。多出的 2 段上下文只增加噪声和成本，因此 k=8 仍是该知识库的最佳点。
+- 逐样本配对（k=8 vs k=4，20 条）：Context Recall 1 胜 0 负 19 平；Answer Relevancy 8 胜 6 负 6 平；Context Precision 2 胜 3 负 15 平；Faithfulness 在 15 条公共可判样本上 1 胜 0 负 14 平。judge 噪声明显，不宜过度解读单个指标的小幅变化。
+- 成本：Dify 生成 token 19,081 / 29,264 / 34,548。k=8、k=10 首轮 judge 用量分别约 162k / 145k tokens；yes/no GT 扩写后只重判 5 条 CR（k=8 7.9k、k=10 10.0k tokens），其余命中缓存；拒答口径重判只涉及 k=8/k=10 各 2 条纯拒答，零额外调用。
 - 工程结论：该知识库与模型组合下 hotpotqa 的最佳点是 k=8，继续加到 10 不带来质量收益。另需注意 Dify 1.18 实际生效的检索深度取 app 的 `dataset_configs.top_k` 与数据集 `retrieval_model.top_k` 的较小值，只改数据集不会生效。
-- 合并两次已判分运行（policy k=4 + hotpotqa k=8），调优后的 41 条总体为 Faithfulness 0.947 / Answer Relevancy 0.675 / Context Precision 0.821 / Context Recall 0.963；相对参考答基线为 -0.037 / +0.173 / +0.210 / -0.004。该行由两次运行按领域拼接，不是单次端到端跑批，引用时需说明口径。
+- 合并两次已判分运行（policy k=4 + hotpotqa k=8），调优后的 41 条总体为 Faithfulness 0.9955（37 条有效、4 条拒答跳过）/ Answer Relevancy 0.675 / Context Precision 0.821 / Context Recall 0.963；相对参考答基线为 +0.012 / +0.173 / +0.210 / -0.004。该行由两次运行按领域拼接，不是单次端到端跑批，引用时需说明口径。
 
 ## 指标口径
 
 | 指标 | 计算方式 | 衡量 |
 |---|---|---|
-| Faithfulness | 被上下文支持的 claim 数 / claim 总数 | 生成是否有幻觉 |
+| Faithfulness | 被上下文支持的 claim 数 / claim 总数；纯拒答没有可验证 claim，记为跳过 | 生成是否有幻觉 |
 | Answer Relevancy | 由回答反推 3 个问题，与原问题求平均相似度（配置 `EMBEDDING_MODEL` 时用 embedding 余弦，否则由 LLM 批量打分） | 回答是否切题 |
 | Context Precision | `AP = Σ_{k: 相关} (前 k 段命中数 / k) / 相关段数` | 检索排序质量 |
 | Context Recall | 被上下文覆盖的要点数 / 标准答案要点总数 | 检索是否漏信息 |
 
 任何一步解析失败返回 `score=None`，不计入均值；报告里通过 `failed_count` 单独统计。
+
+拒答与失败分开处理：
+
+- **纯拒答**（如 “I cannot find it in the knowledge base.”）不含事实性陈述，Faithfulness 记 `score=None, skipped=True`，不计入均值、也不计入 `failed_count`；汇总记 `skipped_count`，多次采样时另记 `skipped_draws`
+- **部分拒答**（先说明知识库没有 X，再回答有依据的部分）先按句过滤拒答/元陈述，只对有事实内容的句子抽 claim 并验证；被过滤的句子写入 `filtered_sentences`
+- 这样同一句拒答不会因为被误抽成 claim 而在 0 与 1 之间跳变；拒答率由 Answer Relevancy、Context Recall 和人工复核观察，不塞进 Faithfulness
+- 多次采样时 `sample_reasons` 保留每次采样的分数与理由，HTML 报告可逐次展开查看
 
 ## 多次采样与稳定性
 
@@ -216,15 +227,16 @@ python -m ragas_eval run --dataset data/system_dify_v1.json \
 
 | 指标 | 单次（T=0） | 3 次均值 | 差值 | `sampling_std` | 可估样本 |
 |---|---|---|---|---|---|
-| Faithfulness | 0.780 | 0.813 | +0.033 | 0.050 | 19/20 |
+| Faithfulness | 0.984 | 0.974 | -0.010 | 0.015 | 16/20（跳过 4） |
 | Answer Relevancy | 0.513 | 0.503 | -0.010 | 0.055 | 19/20 |
 | Context Precision | 0.729 | 0.749 | +0.020 | 0.037 | 20/20 |
 | Context Recall | 0.925 | 0.925 | 0.000 | 0.000 | 20/20 |
 
-- 首轮 T=0 的分数与历史单次报告 80/80 个单元一致，保证新旧数字可比；第 2/3 次有 13/80 个单元结果不同，确认非 0 温度采样没有被缓存复用
-- 78 个可估单元中 18 个 σ>0，最大 σ 0.471：部分边界样本在 0 与 1 之间跳变，单次分数不足以代表其稳定水平
-- 本次运行有 5 个单元、共 7 次采样因超时或服务端 500 缺次；其中 2 个单元仅 1 次有效，σ 记 N/A 且不参与 `sampling_std`。失败只影响该次采样，不改变已有分数。该次报告在修复 σ 口径后由原始采样分数重算汇总，未重新判分
-- 该验证消耗 322k judge tokens（339 次调用、175 次缓存命中），耗时约 28 分钟；3 次均值相对单次的变化在 ±0.033 内，引用时需注明口径
+- 首轮 T=0 的 Faithfulness 均值为 0.984，与单次报告一致；AR/CP/CR 的 60 个单元也全部与历史单次报告一致。非 0 温度的第 2/3 次中，非 F 指标有 19/60 个单元结果不同，确认采样请求没有被缓存复用
+- 75 个可估单元中 17 个 σ>0，最大 σ 0.471（Context Precision 的 Animorphs 三次为 0/1/1）；单次分数仍不足以代表这类边界样本的稳定水平
+- Faithfulness 的方差从旧口径的 σ 0.050 降到 0.015：4 条纯拒答不再随机判 0/1，只剩 2014 S/S 一条部分拒答在 1.0/0.5/1.0 之间波动（σ 0.236）
+- 本次运行有 4 个单元、共 5 次采样因超时或服务端 500 缺次（AR 3 个单元 4 次，CP 1 个单元 1 次）；其中 1 个单元仅 1 次有效，σ 记 N/A 且不参与 `sampling_std`。失败只影响该次采样，不改变已有分数
+- 该验证消耗约 360k judge tokens：原始采样 322k（339 次调用、175 次缓存命中，耗时约 28 分钟）+ 拒答口径重判 37.6k（12 次调用、0 失败）；3 次均值相对单次的变化在 ±0.020 内，引用时需注明口径
 
 ## 报告
 
