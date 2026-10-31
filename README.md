@@ -148,18 +148,18 @@ python -m ragas_eval run --dataset data/system_dify_v1_k8hot.json \
 
 - 参考答基线使用数据集的参考答与参考上下文（参考答均为修正后的正确答案；零上下文的宠物题 CP 无法计算，不计入均值）。参考上下文含 HotpotQA 干扰段，因此基线的 Context Precision 偏低，不能当作检索上界。
 - Faithfulness 的 1.000 是 37 条可作答样本全部 1.0，已饱和，不代表回答质量完美。4 条跳过为 hotpotqa 2 条（Big Stone Gap、Guns N' Roses）与 policy 2 条（带宠物、带薪病假）。对 37 条公共样本配对，新系统 1 胜 36 平 0 负，平均差 +0.009，可作答样本上与基线基本持平；旧 k=4 的 6 条跳过含 4 条 hotpotqa 拒答、2 条 policy 拒答。此前「系统低 0.095、生成侧过度推断」的结论，主要是把英文拒答句误当成 claim 后随机判 0 造成的假差距，不是真实的生成缺陷。
-- Answer Relevancy 新系统 0.656，相对基线 +0.154（26 胜 6 平 9 负，+0.1538），相对旧 k=4 仅 +0.009（14 胜 13 平 14 负，+0.0089）。系统答案更短、更贴问题，而参考答信息冗余；绝对值仍偏低，主要被 hotpotqa 拒答与部分拒答题拉低（hotpotqa 组 0.576、normal 组 0.603）。
+- Answer Relevancy 新系统 0.656，相对基线 +0.154（26 胜 6 平 9 负，+0.1538），相对旧 k=4 仅 +0.009（14 胜 13 平 14 负，+0.0089）。系统答案更短、更贴问题，而参考答信息冗余；绝对值仍偏低，主要被 hotpotqa 拒答与部分拒答题拉低（hotpotqa 组 0.576、normal 组 0.603）。人工校准显示该指标对短答与拒答系统性偏低（见“首轮校准结果”），0.656 不能直接解读为人工感知的相关性。
 - Context Precision 0.821，相对基线 +0.210（40 条可配 19 胜 18 平 3 负，+0.2301）；相对旧 k=4 +0.002（2 胜 36 平 3 负，+0.0016），policy 部分基本不变。
-- Context Recall 0.963，相对基线 -0.004（41 条 1 胜 38 平 2 负，-0.0041），可视为持平，但差异构成不同：Big Stone Gap 仍为 0.5（Greenwich Village 始终召回不到），带薪病假为 0（检索无相关段且拒答，基线 0.667）；宠物题因基线参考上下文为空（基线 0）而系统为 1.0，抵消了大部分差距。Vermont 在 k=8 已召回（k=4 时所需会议段落排第 8）。
+- Context Recall 0.963，相对基线 -0.004（41 条 1 胜 38 平 2 负，-0.0041），可视为持平，但差异构成不同：Big Stone Gap 仍为 0.5（Greenwich Village 始终召回不到），带薪病假为 0（检索无相关段且拒答，基线 0.667）；宠物题因基线参考上下文为空（基线 0）而系统为 1.0，抵消了大部分差距。Vermont 在 k=8 已召回（k=4 时所需会议段落排第 8）。注意 CR 本身未被人工验证（见“首轮校准结果”），该差值只能作参考。
 - 新系统与旧 k=4 的差值为 +0.012 / +0.009 / +0.002 / +0.024。本轮 policy 与 hotpotqa 答案都重新生成，差值包含生成随机性，不完全是 top_k 的因果效应；k=4→k=8 的消融结论以同问题集、同基线的下节配对表为准。
 - 2026-10-30 数据修订：5 道 HotpotQA yes/no 题的 `ground_truth` 由单字扩写为事实句（`answer` 不变），Context Recall 不再因单字 GT 抖动。这使 CR 在此前报告基础上整体上移（基线 0.870→0.967、旧 k=4 系统 0.817→0.939），旧报告的 CR 不可与新报告直接比较。
 - 旧 k=4 系统在 hotpotqa 20 题中有 5 题宽口径拒答：Animorphs、Guns N' Roses、Vermont、Big Stone Gap、2014 S/S。Brown State 原题的 country/county 表述已修正，修正后 k=4 即可答出 9,984，不再计入拒答。
   - Animorphs：正面证据排第 1，拒答属于生成/提示词问题；
-  - Guns N' Roses：直接证据（1999 年宣传单曲）排第 9，严格覆盖需要 `top_k≥10`；k=8 消融中曾作答，但全量复跑又拒答，属于生成/排序共同导致的不稳定；
+  - Guns N' Roses：直接证据（《Oh My God》单曲页写明 1999 年为《End of Days》原声宣传）需要 `top_k=10` 才召回。k=8 的回答是“电影为 *End of Days* (1999)，但知识库未说明 GNR 做宣传”的保留式回答，并非答出 1999；全量复跑时该题变为纯拒答。此前把该题的 CR=1.0 当作“证据已召回”是误读（按关系级标准是假阳性）：CR 只检查标准答案要点 “1999” 是否出现，不检查“GNR 为该片做宣传”这一关系；该题不属于生成侧不稳定；
   - Vermont：所需会议段落排第 8，`top_k=4` 漏掉，`top_k≥8` 可覆盖；
   - Big Stone Gap：所需事实（导演常驻的 Greenwich Village）在 top-10 内完全没有召回，属于语料/embedding 漏检；
   - 2014 S/S：k=4 只答出 YG Entertainment 并拒绝回答成立者，k=8/10 曾退化为完整拒答。
-- k=8 的消融运行让 Animorphs、Guns N' Roses、Vermont 转为回答，但 2026-10-31 的全量复跑中 Guns N' Roses 在 CR=1.0（证据已召回）的情况下又变为纯拒答，说明该题是生成侧不稳定，不能归因于检索深度；Animorphs、Vermont 复跑保持可答，Big Stone Gap 仍召回不到。因此 k=8 是检索深度上的合理拐点，但不保证生成稳定。
+- k=8 的消融运行让 Animorphs 答出、Vermont 可答，Guns N' Roses 只给出“知识库未说明宣传关系”的保留式回答，并非答出 1999；2026-10-31 的全量复跑时该题变为纯拒答。该题的 CR=1.0 在关系级标准下是假阳性：k=8 的 8 段上下文只分散出现 “1999” 与 “Guns N' Roses”，没有任何一段说明 GNR 为该片做宣传；k=10 才召回《Oh My God》单曲页并答出 1999。因此不能把该题归因于生成侧不稳定。Animorphs、Vermont 复跑保持可答，Big Stone Gap 仍召回不到。k=8 是覆盖与噪声的折中，但不能说它修复了 Guns N' Roses。
 - 检索诊断见 `results/system_dify_v1/retrieval_diagnostic.json`（39/41 至少召回一段参考证据）与 `results/system_dify_v1/topk_probe.json`。覆盖扫描（hit-testing，不调用 LLM；参考段落被结果以 Jaccard≥0.5 命中即算覆盖）：
 
 | 领域 | top_k=4 | top_k=6 | top_k=8 | top_k=10 |
@@ -167,7 +167,7 @@ python -m ragas_eval run --dataset data/system_dify_v1_k8hot.json \
 | policy 平均参考段落覆盖率 | 0.652 | 0.735 | 0.752 | 0.802 |
 | hotpotqa 平均参考段落覆盖率 | 0.405 | 0.565 | 0.715 | 0.800 |
 
-policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升；hotpotqa 随 k 单调上升。k=8 的覆盖增益能救回 Vermont 这类漏段题，但 Big Stone Gap 在 top-10 外仍未覆盖，Guns N' Roses 则受生成稳定性影响，因此覆盖率不是回答质量的唯一决定因素。
+policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升；hotpotqa 随 k 单调上升。k=8 的覆盖增益能救回 Vermont 这类漏段题，但 Big Stone Gap 在 top-10 外仍未覆盖，Guns N' Roses 需要 k=10 才召回关系证据，因此覆盖率不是回答质量的唯一决定因素。
 
 ### top_k 消融（hotpotqa 20 条）
 
@@ -181,12 +181,12 @@ policy 在 k=6 后增幅收窄（k=6→8 仅 +0.017），k=10 仍有小幅提升
 
 （Faithfulness 按拒答口径跳过纯拒答：k=4 有效 16 条、跳过 4 条；k=8/k=10 有效 18 条、跳过 2 条。）
 
-- k=8 是拐点：该次消融中 Animorphs、Guns N' Roses、Vermont 三条拒答转为回答，Context Recall +0.050 来自 Vermont（0→1），Big Stone Gap 仍为 0.5，其余题在 k=4 已覆盖。Context Precision 基本不变（+0.003）。但全量复跑时 Guns N' Roses 又拒答（见上），说明单次生成对边界题有随机性。
+- k=8 是拐点：该次消融中 Animorphs 答出、Vermont 可答，Guns N' Roses 仅给出保留式回答（未答出 1999）；Context Recall +0.050 来自 Vermont（0→1），Big Stone Gap 仍为 0.5，其余题在 k=4 已覆盖。Context Precision 基本不变（+0.003）。Guns N' Roses 的 CR=1.0 在关系级标准下是假阳性，不能据此认为关系证据已召回；k=10 才召回《Oh My God》单曲页并答出 1999。全量复跑时该题变为纯拒答，两次都没有关系证据支撑，不能归因于检索深度，也不能证明生成随机性。
 - Faithfulness 在 k=8/k=10 已饱和：18 条可作答样本全部为 1.0，k=4 的 0.984 也只有一条 0.75。此前「k=8 让 Faithfulness +0.120」并非检索改善了事实支撑，而是 k=4 的纯拒答被随机判 0/0.333；改用拒答跳过口径后，15 条两边都可判定的公共样本配对平均仅 +0.017（1 胜 14 平 0 负）。
-- k=10 与 k=8 同为 F 1.000、CR 0.975，但 Answer Relevancy 回落到 0.519；2014 S/S 从部分拒答变成完整拒答，Big Stone Gap 仍召回不到。多出的 2 段上下文只增加噪声和成本，因此 k=8 仍是该知识库的最佳点。
+- k=10 与 k=8 同为 F 1.000、CR 0.975，但 Answer Relevancy 回落到 0.519；2014 S/S 从部分拒答变成完整拒答，Big Stone Gap 仍召回不到。k=10 多出的上下文对 Guns N' Roses 是必要证据（《Oh My God》单曲页），但对 2014 S/S 等题成了噪声，因此不能一概说 k=10 只增加成本；按当前指标 k=8 的综合表现更稳。
 - 逐样本配对（k=8 vs k=4，20 条）：Context Recall 1 胜 0 负 19 平；Answer Relevancy 8 胜 6 负 6 平；Context Precision 2 胜 3 负 15 平；Faithfulness 在 15 条公共可判样本上 1 胜 0 负 14 平。judge 噪声明显，不宜过度解读单个指标的小幅变化。
 - 成本：Dify 生成 token 19,081 / 29,264 / 34,548。k=8、k=10 首轮 judge 用量分别约 162k / 145k tokens；yes/no GT 扩写后只重判 5 条 CR（k=8 7.9k、k=10 10.0k tokens），其余命中缓存；拒答口径重判只涉及 k=8/k=10 各 2 条纯拒答，零额外调用。
-- 工程结论：该知识库与模型组合下 hotpotqa 的最佳点是 k=8，继续加到 10 不带来质量收益。另需注意 Dify 1.18 实际生效的检索深度取 app 的 `dataset_configs.top_k` 与数据集 `retrieval_model.top_k` 的较小值，只改数据集不会生效。
+- 工程结论：该知识库与模型组合下 hotpotqa 的默认点选 k=8，兼顾覆盖与噪声；k=10 能召回 Guns N' Roses 的关系证据，但会牺牲 2014 S/S 并使 AR 回落，是否值得取决于更看重哪类题。另需注意 Dify 1.18 实际生效的检索深度取 app 的 `dataset_configs.top_k` 与数据集 `retrieval_model.top_k` 的较小值，只改数据集不会生效。
 - 单次端到端复跑（2026-10-31，policy k=4 + hotpotqa k=8，41 条一次生成）：Faithfulness 1.000（37 有效、4 跳过）/ Answer Relevancy 0.656 / Context Precision 0.821 / Context Recall 0.963，相对参考答基线 +0.017 / +0.154 / +0.210 / -0.004。hotpotqa 子集为 F 1.000（18 有效、2 跳过）/ AR 0.576 / CP 0.733 / CR 0.975，与上表 k=8 首轮（0.572 / 0.732 / 0.975）在 judge 噪声内一致；文档不再使用按领域拼接的合并口径。
 - 成本：本轮 Dify 生成 41,277 tokens（41 次调用，平均 4.3s/条）；judge 主判分 145,849 tokens（107 次调用、329 次缓存命中、2 次重试），补判 14,915 tokens，判分耗时 862.4s。缓存命中部分不计费。
 
@@ -242,6 +242,69 @@ python -m ragas_eval run --dataset data/system_dify_v1.json \
 - 本次运行有 4 个单元、共 5 次采样因超时或服务端 500 缺次（AR 3 个单元 4 次，CP 1 个单元 1 次）；其中 1 个单元仅 1 次有效，σ 记 N/A 且不参与 `sampling_std`。失败只影响该次采样，不改变已有分数
 - 该验证消耗约 360k judge tokens：原始采样 322k（339 次调用、175 次缓存命中，耗时约 28 分钟）+ 拒答口径重判 37.6k（12 次调用、0 失败）；3 次均值相对单次的变化在 ±0.020 内，引用时需注明口径
 
+## 人工校准
+
+LLM judge 的绝对分需要人工抽检支撑。`scripts/calibrate_judge.py` 从一份评测报告里做**目的抽样**，生成不显示 judge 分数的盲评页面，再把人工 1–5 分与 judge 0–1 分配对，计算 Spearman 秩相关与二分类 Cohen's Kappa。
+
+```bash
+# 1. 生成 25 条盲评表（默认 seed=20261031，可复现）
+python scripts/calibrate_judge.py make \
+  --report results/system_dify_v1_k8hot/eval_report_20261031_154814_final.json \
+  --output-dir results/calibration
+
+# 2. 浏览器打开 calibration_sheet.html，逐条评分并导出 JSON
+
+# 3. 计算一致性报告（Markdown + JSON）
+python scripts/calibrate_judge.py score \
+  --ratings results/calibration/calibration_ratings_<时间戳>.json \
+  --key results/calibration/calibration_key.json \
+  --output results/calibration/calibration_report.md
+```
+
+- 抽样规则：按标签配额（normal_policy 5 / normal_hotpotqa 8 / boundary 6 / adversarial 6），**全部纯拒答强制入样**，其余优先覆盖 AR/CP/CR 的低（<0.5）、中（<0.85）、高分段。这是低分富集样本，**不能用来估计总体均值或通过率**。
+- 盲评页只显示问题、系统回答、检索上下文和标准答案；judge 分数在 `calibration_key.json` 里，评分完成前不要打开。
+- 页面用 `localStorage` 自动保存，导出的 JSON 带 `sheet_id`；计分时会校验 `sheet_id`，旧抽样表的评分不会被误用于新样本。
+- 评分标准：每个指标 1–5 分或 N/A（标准见 `calibration_rubric.md`）。纯拒答的 Faithfulness 记 N/A；纯拒答的 Answer Relevancy 按“没有回答问题”给低分。
+- 统计口径：Spearman 用平均秩处理并列，p 值为 2000 次置换检验；Kappa 按 judge ≥0.6、人工 ≥3 二分。某一方无方差时 Spearman / Kappa 显式记为不可估，不用 0 代替。
+- 阈值敏感性：CP/CR 的 3 分是“部分满足”，默认算通过会扭曲一致性；本轮 CP 在人工 ≥4 时 human–judge κ 为 0.689（≥3 时 0.519）。当前 `--human-pass` 是全局阈值，按指标配置阈值或输出敏感性是后续改进。
+- 已知局限：单评分人，无评分者间信度；当前 k=8 报告的 37 条可作答样本 Faithfulness 全为 1.0，F 的 Spearman 不可估，只能看一致率与假阳性样本。
+
+### 首轮校准结果（25 条，2026-10-31）
+
+对 `dify-1.18.0-bge-m3-policy4-hotpotqa8` 的报告抽 25 条盲评，报告见 `results/calibration/calibration_report.md`。阈值：judge ≥0.6、人工 ≥3。
+
+| 指标 | 可配对 n | Spearman ρ（置换 p） | Cohen's κ | 一致率 | judge / 人工通过率 | 假阳性 / 假阴性 |
+|---|---:|---:|---:|---:|---:|---:|
+| Faithfulness | 21（4 条纯拒答跳过） | 不可估（judge 全为 1.0） | 不可估（退化） | 1.000 | 1.000 / 1.000 | 0 / 0 |
+| Answer Relevancy | 25 | -0.079（0.723） | 0.000（退化） | 0.640 | 0.640 / 1.000 | 0 / 9 |
+| Context Precision | 25 | **0.783（0.001）** | **0.519** | 0.840 | 0.720 / 0.880 | 0 / 4 |
+| Context Recall | 25 | 0.461（0.055） | 0.457 | 0.920 | 0.920 / 0.920 | 1 / 1 |
+
+只在 21 条可作答样本上复算（去掉 4 条纯拒答）：Context Precision ρ 0.787、κ 0.774、一致率 0.952，结论更稳；Answer Relevancy ρ -0.220（p=0.338）、7 条假阴性；Context Recall 与 Faithfulness 均因双方饱和而不可估。
+
+- **Context Precision 的支持最强，但阈值一致性依赖“3 分算不算通过”**：排序相关明确为正（ρ 0.783，可作答子集 0.787），而默认把“3 分=部分满足”算通过时 κ 只有 0.519；把 CP 的通过线改为 ≥4 后，人工–judge κ 升到 0.689、一致率 0.88。judge 对检索排序的方向性判断与人工一致，但 0.6 的二分阈值本身需要按指标校准，不能直接把 κ 0.519 当作“已验证”。
+- **Answer Relevancy 与人工不一致**：9/25 为 judge 不通过、人工通过，其中 5 条分数在 0.50–0.583，属于阈值边缘；短答正确样本（`C23` 只答 “Kansas Song”、`C25` 只答 “David Weissman”）被 judge 判 0.2/0，人工给 5，判分器对“不是完整句子/不能反推出问题”的答案系统性压低。另有 4 条纯拒答人工给 4–5 分，按评分标准纯拒答应给低分，说明该子集的人工分更接近“回答是否得体”而非“是否回答问题”。因此 AR 的绝对值 0.656 不能解读为人工感知的相关性，0.6 阈值也需要单独校准。
+- **Context Recall 饱和且对关系缺失不敏感**：21 条可作答样本里 judge 全为 1.0、人工全部 ≥3，双方都饱和；去掉拒答后不可估。`C19`（Guns N' Roses）judge 1.0、人工 1、AI 第二评分员 3：标准答案只有 “1999” 一个要点，上下文里《End of Days》段落出现了 1999，judge 就判覆盖，但没有任何一段说明 GNR 为该片做宣传。按默认 ≥3 阈值 AI 的 3 分通过，按 ≥4 则失败；因此更准确的说法是“关系级标准下的假阳性”，而不是所有评分者都会判失败。CR 0.963 更可能是“要点出现即算覆盖”的上限，而非已被人工验证；带关系或多跳的问题会被系统性高估。
+- **Faithfulness 无法校准**：21 条可作答样本 judge 全为 1.0，人工全 ≥3，一致率 100% 只说明这批样本没有出现“judge 认为忠实、人工认为不忠实”的反例，不能证明 judge 能识别幻觉。唯一人工 F=2 的是 `C19`，而该条被 judge 以纯拒答跳过，未进入配对。
+- 校准同时暴露评分标准执行问题：4 条纯拒答按 rubric 应记 F N/A、AR 低分，实际人工给了 F 5/4/4/2 与 AR 5/4/4/4。下一轮应安排两名评分人先对齐标准，再计算评分者间信度；当前结果只能当作单人的探索性检查。
+
+### AI 第二评分员（探索性，2026-10-31）
+
+为区分“judge 与人工不一致”是 judge 偏差还是人工评分问题，额外让一个独立子代理做盲评：只给 `calibration_blind.json` 和 `calibration_rubric.md`，不告诉它 judge 分数、人工评分或任何评测报告；25 条全部完成。评分文件 `results/calibration/_ai_ratings.json`，对照报告 `_ai_vs_judge.md` / `_ai_vs_human.md`（均在 gitignore 的 `results/` 下）。
+
+| 指标 | judge–人工 ρ / κ | AI–judge ρ / κ | AI–人工 ρ / κ |
+|---|---:|---:|---:|
+| Faithfulness | N/A / N/A | N/A / N/A | N/A / N/A |
+| Answer Relevancy | -0.079 / 0.000 | 0.201 / 0.111 | 0.289 / 0.000 |
+| Context Precision | 0.783 / 0.519 | 0.747 / 0.519 | 0.487 / -0.136 |
+| Context Recall | 0.461 / 0.457 | 0.723 / 1.000（n=23） | 0.557 / 0.646（n=23） |
+
+- **AR：独立复现了短答失真**。AI 对 `C23`、`C25`、`C11`、`C04`、`C17`、`C21`、`C24` 判通过，judge 判不通过（7 条 AI–judge 假阴性）；去掉 4 条纯拒答后，AI 与人工在 21 条可作答样本上全部通过，20/21 分差 ≤1。反过来，AI 按 rubric 给 4 条纯拒答 F=N/A、AR 1–2，人工给 F 5/4/4/2、AR 5/4/4/4，说明拒答子集的人工分确实偏离“是否回答问题”。
+- **CP：排序一致，阈值敏感**。AI–judge ρ 0.747、κ 0.519，与人工–judge 接近；但 AI–人工在 ≥3 时 κ -0.136，因为 AI 把 `C11`/`C15`/`C19` 这类“关键证据排在后段”的样本给 3（部分满足），人工给 1–2（不通过）。把通过线改为 ≥4 后，AI–人工 κ 升到 0.464，人工–judge κ 升到 0.689。
+- **CR：饱和，C19 依赖判定标准**。AI–judge 在 23 条可配对样本上 κ 1.0，AI–人工 κ 0.646；AI 对 `C19` 给 3（默认 ≥3 通过、≥4 失败）。关系证据缺失是事实，但“假阳性”只在把部分覆盖视为不通过时成立。
+- **F 仍无法校准**。AI 给 21 条可作答样本全 5，人工在同样 21 条上为 5×13 / 4×6 / 3×2，双方都没有低分反例；AI 对 4 条纯拒答 F=N/A 符合 rubric。
+- **局限**：AI 评分员是 LLM，不是第二个真人；AI–人工 κ 不是评分者间信度，不能替代双人校准。评分 prompt 里对纯拒答的约定（F=N/A、AR 低分）会放大拒答样本上与人工的差异，因此这组数字只能作三角验证，不能当金标。
+
 ## 报告
 
 每次运行输出：
@@ -281,12 +344,14 @@ ragas_eval/
 ├── engine.py         # 并发调度、断点续跑、分层汇总
 ├── report.py         # 自包含 HTML 报告
 ├── compare.py        # A/B 对比
+├── calibration.py    # 人工分层抽样、盲评页面与 Spearman / Kappa
 ├── cache.py          # SQLite 响应缓存
 ├── dataset.py        # 数据集加载、tags 校验与过滤
 └── metrics/          # 四个指标
 scripts/
 ├── convert_dataset.py    # 外部数据转评测集
 ├── generate_answers.py   # 用单个 LLM 补答案
+├── calibrate_judge.py    # 生成盲评表并计算人机一致性
 └── run_dify_system.py    # 从 Dify Chat App 采集系统回答与检索上下文
 tests/                # pytest，全部离线运行
 data/                 # 41 条中英双语分层评测集
@@ -304,7 +369,7 @@ python -m pytest -q
 
 ## 局限
 
-- 尚未做人工金标一致性校准（Kappa / Spearman）；多次采样已支持，但默认仍为单次以保证与历史数字同口径
+- 已完成首轮 25 条单人人工校准：Context Precision 排序一致（ρ 0.783；默认把 3 分算通过时 κ 0.519，把 3 分视为不通过时 κ 0.689），Answer Relevancy 不一致（9 条假阴性），Context Recall 饱和且对关系缺失不敏感（`C19` 在关系级标准下是假阳性），Faithfulness 因饱和无法校准；另做了一轮 AI 第二评分员盲评作三角验证，但 AI 不是真人，不能替代双人信度。样本为目的抽样、单评分人，且拒答子集的评分偏离评分标准，不能当作人工金标或总体估计
 - 端到端运行器目前只适配 Dify Chat API；接入其他系统需按同样接口准备 `question + contexts + answer`
 - LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读；更换 judge 后应重判基线再比较
 - 主集 41 条已去重：3 组同主题样本现在是「直接提问」与「虚假前提」的对照，不再共用同一问题；`tests/test_dataset.py` 会阻止重复题回归
