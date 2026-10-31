@@ -143,7 +143,7 @@ python -m ragas_eval run --dataset data/system_dify_v1_k8hot.json \
 
 `--apps-file` 放在仓库外，内容为 `{"base_url": "http://localhost:8080", "apps": {"policy": {"api_key": "...", "app_id": "..."}, "hotpotqa": {...}}}`，API Key 不进版本库。
 
-实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、无 rerank；policy 与 hotpotqa 各一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。2026-10-31 的单次端到端跑批使用 **policy `top_k=4` + hotpotqa `top_k=8`**，旧的全量 k=4 结果保留作对照。
+实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、无 rerank；policy 与 hotpotqa 各一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。2026-10-31 的单次端到端跑批使用 **policy `top_k=4` + hotpotqa `top_k=8`**，旧的全量 k=4 结果保留作对照。2026-11-01 因火山方舟额度上限，生成侧临时切到阿里云 MaaS `deepseek-v4-pro-0813` 跑稳定性批次（见“生成稳定性”）；随后 hotpotqa 应用改为 `qwen3.8-flash`（policy 仍为 deepseek），主表仍对应火山模型。
 
 同一 judge（`deepseek-v4-pro-0813`）判分后的对比（新系统报告：`results/system_dify_v1_k8hot/eval_report_20261031_154814_final.json`；Context Recall 为 `relation-v2` 重判结果，其余指标沿用原报告）：
 
@@ -269,6 +269,69 @@ python -m ragas_eval run --dataset data/system_dify_v1.json \
 - 2014 S/S 题的回答明确说“知识库没有说明由谁成立”，但 CR v1 仍给 1.0：上下文只写了专辑由 YG Entertainment 发行，没有写组合由 YG 成立。这是继 `C19` 之后第二个关系级假阳性，v2 重判为 0.0；同表的 David Beckham 与 Random House 在 v2 下仍为 1.0
 - 要测生成稳定性，需要重新调用被测 RAG 系统生成多份回答，再逐份判分；当前 `--samples` 不覆盖这一步
 
+### 生成稳定性：重新生成，而不是重复判分
+
+`scripts/run_dify_system.py` 支持 `--generations N` 与 `--questions-file`：同一道题调用被测系统 N 次，记录 `system.generation`，断点续跑按（题目，次数）定位；`scripts/analyze_generation_stability.py` 将多代输出与评测报告按题对齐，输出答案/上下文一致性、逐题指标均值与组内 σ。
+
+```bash
+python scripts/run_dify_system.py --dataset data/eval_dataset.json \
+  --questions-file results/stability/stability_questions.txt --generations 3 \
+  --output results/stability/system_dify_stability_k8.json
+python -m ragas_eval run --dataset results/stability/system_dify_stability_k8.json \
+  --output-dir results/stability \
+  --system-version dify-1.18.0-bge-m3-policy4-hotpotqa8-s3
+python scripts/analyze_generation_stability.py \
+  --system results/stability/system_dify_stability_k8.json \
+  --report results/stability/eval_report_*.json
+```
+
+本文不把 `--samples` 的 judge 波动写成生成波动；生成稳定性需要单独跑上面的批次。抽样题目可按主集索引复现，例如 0 / 10 / 15 / 19 / 20 / 29 / 31 / 40（长答、短答、数值、拒答与边界计算各覆盖若干）。
+
+### 实测：8 题 × 3 次（2026-11-01）
+
+火山方舟 `deepseek-v4-pro-ga` 的安心体验模式额度耗尽后，Dify 生成侧切到阿里云 MaaS `deepseek-v4-pro-0813`（temperature 0.1，policy `top_k=4` / hotpotqa `top_k=8`），重跑 8 题 × 3 次。**主表 41 条仍是火山模型；本批是阿里云模型，且该模型同时充当 judge，存在自评偏差，绝对分不能与主表并列。** 本批只解读同一题的三次波动：
+
+| 观测 | 结果 |
+|---|---|
+| 检索上下文 | 8/8 题三次集合完全一致（平均 Jaccard 1.000） |
+| 答案完全一致 | 1/8 题 |
+| 平均答案相似度 | 0.678 |
+| Faithfulness 组内波动 | 1/8 题，平均 σ 0.071，最大 0.500 |
+| Answer Relevancy 组内波动 | 6/8 题，平均 σ 0.154，最大 0.440 |
+| Context Precision / Recall 组内波动 | 0/8 题（两指标只看上下文，上下文相同则分数必然相同） |
+
+- `2014 S/S` 是生成不稳定的代表：同一问题、同一批 8 段上下文，三次回答分别是 “WINNER was formed by YG Entertainment.”（F 0、AR 0.933）、纯拒答（F 跳过、AR 0）、以及“上下文只说专辑由 YG 发行、没有说谁成立组合”（F 1、AR 0.933）；CR 三次都 0（关系级 v2 的已知边界）。检索完全一致时，生成侧仍会出现幻觉、拒答与正确拒答三种行为。
+- 工龄题“9 年 11 个月”的三次回答是空字符串、完整句、“5天。”，AR 分别为 0 / 0.817 / 0.1；空回答是 Dify 记录 `completion_tokens=512`、恰好达到应用 `max_tokens` 上限后的真实失败，不是判分噪声。短答“5天。”再次触发 AR 对短答/非完整句的低分偏差。
+- 病假题（虚假前提）三次都是拒答，F 跳过、CP/CR 为 0；拒答文本的 AR 反而为 0.733–0.967，说明 AR 对“礼貌拒答”仍可能给高相关性，不能把 AR 当拒答检测器。
+- 本批 24 条中有 2 条 AR 因 judge 超时失败。空回答的 Faithfulness 在修复前被记为 1.0（“没有可验证的陈述”），修复后按失败处理；CP/CR 的 0 方差是定义使然，不能据此宣称检索在所有条件下稳定。结果在 `results/stability/generation_stability_aliyun_s3.{md,json}`。
+- 2026-11-01 之后 hotpotqa 应用已单独切到 `qwen3.8-flash`（policy 仍为 `deepseek-v4-pro-0813`），上表仍是切换前的双 deepseek 批次。qwen3.8-flash 默认开启思考：冒烟中 Kansas 与 Brown State 两题 3–10 秒答对，`2014 S/S` 一题思考 4,175 completion tokens、耗时约 69 秒后拒答；Dify 的 `max_tokens=512` 没有截断思考 token，后续批次需按混合模型分域解读，不能与上表混算。
+
+### qwen3.8-flash 4 题对照（2026-11-01）
+
+把 hotpotqa 切到 `qwen3.8-flash` 后，用同一批 4 道 hotpotqa 题各生成 3 次；检索上下文与上面的 deepseek 批次逐题完全一致，judge 仍为 `deepseek-v4-pro-0813`：
+
+| 指标（4 题 × 3 次） | deepseek-v4-pro-0813 | qwen3.8-flash |
+|---|---|---|
+| Faithfulness | 0.909（11 有效 / 1 跳过） | 1.000（11 有效 / 1 跳过） |
+| Answer Relevancy | 0.660（10 有效 / 2 超时） | 0.450（12 有效） |
+| Context Precision | 0.812 | 0.812 |
+| Context Recall (`relation-v2`) | 0.750 | 0.750 |
+| 答案完全一致 | 1/4 | 1/4 |
+| 上下文完全一致 | 4/4 | 4/4 |
+
+- 上下文逐题相同，所以 CP/CR 相同；差异只在生成侧。qwen 的答案平均相似度 0.563，deepseek 为 0.734（deepseek 的三次答案更稳定，2014 S/S 除外）。
+- qwen 的 F 1.000 不是“更忠实”：`2014 S/S` 两次只答 “YG Entertainment”，judge 因该实体在上下文出现而判支持；deepseek 的完整句 “WINNER was formed by YG Entertainment.” 因关系不被支持判 0。短答隐藏了关系断言，F 无法识别，而两者的 CR v2 都是 0。
+- qwen 的 AR 0.450 低于 deepseek 0.660，但 deepseek 有 2 次 AR 超时未计入均值；逐题看，qwen 的 Kansas 标题（0.2）、Beckham 短答 “1986 to 2013”（0.1）、Brown 短答 “9,984 inhabitants.”（0.2）都被 AR 压低，是已知短答偏差的复现，不代表答案错误。
+- 2014 S/S 的三次是 “YG Entertainment” ×2 + 一次拒答；Kansas 三次完全一致但 AR 恒为 0.2；Beckham 两次完整句 + 一次短答，AR 0.8/0.8/0.1；Brown 三种写法，AR 0.85/0.65/0.2。AR 的组内波动主要跟随答案形式，而不是 judge 随机噪声。
+
+### 为什么 `2014 S/S` 会长时间思考后拒答
+
+- **不是 HTTP 超时**：4 题 × 3 次全部返回 200，Dify `messages.status` 全为 `normal`，runner 失败数为 0，本批最大延迟 17.3 秒；冒烟那次 68.9 秒也是 200 正常完成。
+- **拒答的直接原因是上下文缺少关系证据**：8 段上下文里只有第 1 段提到 `2014 S/S` 与 WINNER，且只写“专辑由 YG Entertainment 发行”，没有写“组合由 YG 成立”；另外 5 段是 Shinee、Seventeen、SF9、History、Madtown 等“由某公司成立”的干扰段。问题问 `formed by who`，正好落在缺失的关系上。
+- **模型确实在权衡这个缺口**：直接调用 qwen 复现时，reasoning 明确写道 “It does not explicitly state that WINNER was formed by YG Entertainment... should I say I cannot find it, or infer YG Entertainment?”。Dify 正式批次的 3 次里 2 次推断 YG、1 次拒答，直接 API 复现 4 次都推断 YG；拒答符合 app 预提示第 2 条“上下文没有答案就明确说找不到”，是内容判断，不是超时或服务错误。
+- **长延迟来自思考 token**：Dify 的 OpenAI 兼容插件在 `strict` 兼容模式下不会发送 `enable_thinking=false`，只有 `compatibility_mode=extended` 才会发送；qwen3.8-flash 默认开启思考。`2014 S/S` 的拒答用了 1,474 completion tokens / 17.3 秒，冒烟那次 4,175 / 68.9 秒；按实测约 60–85 tok/s 计算，延迟与思考 token 成正比。
+- **可选修复**：把该模型 credentials 的 `compatibility_mode` 设为 `extended`（`agent_thought_support` 仍为 `not_supported`），插件会发送 `enable_thinking=false`。直连测试 200、无 reasoning、2.4 秒返回；启用后生成行为会变，需要重跑本批才能与上表比较。
+
 ## 人工校准
 
 LLM judge 的绝对分需要人工抽检支撑。`scripts/calibrate_judge.py` 从一份评测报告里做**目的抽样**，生成不显示 judge 分数的盲评页面，再把人工 1–5 分与 judge 0–1 分配对，计算 Spearman 秩相关与二分类 Cohen's Kappa。
@@ -292,7 +355,7 @@ python scripts/calibrate_judge.py score \
 - 盲评页只显示问题、系统回答、检索上下文和标准答案；judge 分数在 `calibration_key.json` 里，评分完成前不要打开。
 - 页面用 `localStorage` 自动保存，导出的 JSON 带 `sheet_id`；计分时会校验 `sheet_id`，旧抽样表的评分不会被误用于新样本。
 - 评分标准：每个指标 1–5 分或 N/A（标准见 `calibration_rubric.md`）。纯拒答的 Faithfulness 记 N/A；纯拒答的 Answer Relevancy 按“没有回答问题”给低分。
-- 统计口径：Spearman 用平均秩处理并列，p 值为 2000 次置换检验；Kappa 按 judge ≥0.6 二分，人工通过线按指标配置：**F/AR ≥3、CP/CR ≥4**（CP/CR 的 3 分是“部分满足”，默认不算通过）。报告同时输出人工线 ≥3 / ≥4 的阈值敏感性表；需要全局覆盖时用 `--human-pass 3`，按指标覆盖用 `--human-pass-map context_precision=4,context_recall=4`。某一方无方差时 Spearman / Kappa 显式记为不可估，不用 0 代替。
+- 统计口径：Spearman 用平均秩处理并列，p 值为 2000 次置换检验；Kappa 按 judge ≥0.6 二分，人工通过线按指标配置：**F/AR ≥3、CP/CR ≥4**（CP/CR 的 3 分是“部分满足”，默认不算通过）。报告同时输出人工线 ≥3 / ≥4 的阈值敏感性表，以及固定人工线、judge 阈值 0–1（步长 0.05）的扫描表；扫描给出的最优阈值是**样本内**结果，只用于敏感性分析。需要全局覆盖时用 `--human-pass 3`，按指标覆盖用 `--human-pass-map context_precision=4,context_recall=4`。某一方无方差时 Spearman / Kappa 显式记为不可估，不用 0 代替。
 - 已知局限：单评分人，无评分者间信度；当前 k=8 报告的 37 条可作答样本 Faithfulness 全为 1.0，F 的 Spearman 不可估，只能看一致率与假阳性样本。
 
 ### 首轮校准结果（25 条，2026-10-31）
@@ -311,8 +374,9 @@ CR 的 v2 行与上一行使用同一批人工评分，只把 judge 的 CR 分�
 
 只在 21 条可作答样本上复算（去掉 4 条纯拒答）：Context Precision 在人工 ≥4 时 ρ 0.787、κ 0.829、一致率 0.952（≥3 时 κ 0.774），结论更稳；Answer Relevancy ρ -0.220（p=0.338）、7 条假阴性；Context Recall 在 v2 下仍饱和（judge 均值 0.976、20/21 通过，ρ 0.022、κ -0.077），整体 ρ 的改善主要来自 C19 一条；Faithfulness 因双方全为 1.0 仍不可估。
 
-- **Context Precision 的支持最强，但阈值一致性依赖“3 分算不算通过”**：排序相关明确为正（ρ 0.783，可作答子集 0.787）；把“3 分=部分满足”算通过时 κ 只有 0.519，改用 CP 默认的 ≥4 后人工–judge κ 升到 0.689、一致率 0.88（可作答子集 κ 0.829）。工具现在默认按指标配置阈值并输出 ≥3/≥4 敏感性表，但 judge 的 0.6 阈值本身仍待校准，不能把任一个 κ 当作“已验证”。
-- **Answer Relevancy 与人工不一致**：9/25 为 judge 不通过、人工通过，其中 5 条分数在 0.50–0.583，属于阈值边缘；短答正确样本（`C23` 只答 “Kansas Song”、`C25` 只答 “David Weissman”）被 judge 判 0.2/0，人工给 5，判分器对“不是完整句子/不能反推出问题”的答案系统性压低。另有 4 条纯拒答人工给 4–5 分，按评分标准纯拒答应给低分，说明该子集的人工分更接近“回答是否得体”而非“是否回答问题”。因此 AR 的绝对值 0.656 不能解读为人工感知的相关性，0.6 阈值也需要单独校准。
+- **Context Precision 的支持最强，但阈值一致性依赖“3 分算不算通过”**：排序相关明确为正（ρ 0.783，可作答子集 0.787）；把“3 分=部分满足”算通过时 κ 只有 0.519，改用 CP 默认的 ≥4 后人工–judge κ 升到 0.689、一致率 0.88（可作答子集 κ 0.829）。工具现在默认按指标配置阈值并输出 ≥3/≥4 敏感性表，但不能把任一个 κ 当作“已验证”。
+- **Judge 0.6 阈值扫描（样本内）**：固定人工通过线，把 judge 阈值按 0.05 从 0 扫到 1。CP 在 0.6 处 κ 0.689，0.85–1.00 样本内最高 0.803；CR 在 0.6 处 κ 0.419，0.05–0.50 样本内最高 0.505；F/AR 因人工判定全为同一类，所有阈值下 κ 都退化。扫描表已写入 `calibration_report_cr_v2.md`，但同一批 25 条既挑阈值又评估，且低分富集，结果偏乐观；默认阈值仍用 0.6，等独立校准集再决定是否调整。
+- **Answer Relevancy 与人工不一致**：9/25 为 judge 不通过、人工通过，其中 5 条分数在 0.50–0.583，属于阈值边缘；短答正确样本（`C23` 只答 “Kansas Song”、`C25` 只答 “David Weissman”）被 judge 判 0.2/0，人工给 5，判分器对“不是完整句子/不能反推出问题”的答案系统性压低。另有 4 条纯拒答人工给 4–5 分，按评分标准纯拒答应给低分，说明该子集的人工分更接近“回答是否得体”而非“是否回答问题”。因此 AR 的绝对值 0.656 不能解读为人工感知的相关性。AR 的 0.6 阈值扫描因人工判定全为通过、κ 退化，无法从这批样本判断阈值是否合适。
 - **Context Recall 的 v1 关系假阳性被 v2 修正，但出现两类新假阴性**：v1 下 `C19`（Guns N' Roses）judge 1.0、人工 1；v2 判 0.0，假阳性消除（重判报告里 2014 S/S 也从 1.0 降到 0.0）。用同一批 25 条人工评分重算，ρ 从 0.461 升到 0.484（p 0.055→0.015），但默认 ≥4 的 κ 从 0.432 降到 0.419、一致率 0.84→0.80：`C01`（否定式 GT“知识库没有携带宠物制度”，人工 4、judge 0）与 `C07`（GT 说实习生不享受补充医保，上下文只说正式员工适用，人工 4、judge 0.5）成为假阴性。按人工 ≥3 时 κ 为 0.516（v1 0.457），优于默认线；因此 v2 改善了排序与关系假阳性，但没有在二分类通过率上全面超过 v1。CR 0.866 仍不能当作已人工验证的绝对水平。
 - **Faithfulness 无法校准**：21 条可作答样本 judge 全为 1.0，人工全 ≥3，一致率 100% 只说明这批样本没有出现“judge 认为忠实、人工认为不忠实”的反例，不能证明 judge 能识别幻觉。唯一人工 F=2 的是 `C19`，而该条被 judge 以纯拒答跳过，未进入配对。
 - 校准同时暴露评分标准执行问题：4 条纯拒答按 rubric 应记 F N/A、AR 低分，实际人工给了 F 5/4/4/2 与 AR 5/4/4/4。下一轮应安排两名评分人先对齐标准，再计算评分者间信度；当前结果只能当作单人的探索性检查。
@@ -400,7 +464,7 @@ python -m pytest -q
 
 ## 局限
 
-- 已完成首轮 25 条单人人工校准：Context Precision 排序一致（ρ 0.783；按默认指标阈值 CP/CR ≥4 时 κ 0.689，全局 ≥3 时 κ 0.519），Answer Relevancy 不一致（9 条假阴性），Faithfulness 因饱和无法校准；另做了一轮 AI 第二评分员盲评作三角验证，但 AI 不是真人，不能替代双人信度。样本为目的抽样、单评分人，且拒答子集的评分偏离评分标准，不能当作人工金标或总体估计。CR 已用同一批人工评分按 v2 重算（ρ 0.484/p 0.015；默认 ≥4 κ 0.419，≥3 κ 0.516），C19 假阳性消除，但 C01/C07 成为假阴性；这不是新一轮独立人工校准
+- 已完成首轮 25 条单人人工校准：Context Precision 排序一致（ρ 0.783；按默认指标阈值 CP/CR ≥4 时 κ 0.689，全局 ≥3 时 κ 0.519），Answer Relevancy 不一致（9 条假阴性），Faithfulness 因饱和无法校准；另做了一轮 AI 第二评分员盲评作三角验证，但 AI 不是真人，不能替代双人信度。Judge 阈值 0–1 的样本内扫描显示 CP/CR 在 0.6 处不是最优（CP 0.85–1.00 κ 0.803，CR 0.05–0.50 κ 0.505），但样本内择优会高估一致性，默认阈值保持 0.6。样本为目的抽样、单评分人，且拒答子集的评分偏离评分标准，不能当作人工金标或总体估计。CR 已用同一批人工评分按 v2 重算（ρ 0.484/p 0.015；默认 ≥4 κ 0.419，≥3 κ 0.516），C19 假阳性消除，但 C01/C07 成为假阴性；这不是新一轮独立人工校准
 - Context Recall 已升级为 `relation-v2`，并已重判基线、旧 k4、k8 全量与 k8/k10 消融：历史报告（v1）的 CR 分数与 v2 不可直接横比；后续旧报告需要比较时用 `python -m ragas_eval rejudge --report <旧报告> --metrics context_recall` 重判
 - 端到端运行器目前只适配 Dify Chat API；接入其他系统需按同样接口准备 `question + contexts + answer`
 - LLM Judge 存在模型偏好，指标绝对值应结合人工抽检解读；更换 judge 后应重判基线再比较
@@ -408,6 +472,7 @@ python -m pytest -q
 - 参考答基线的 Context Precision 使用数据集参考上下文（含 HotpotQA 干扰段），不代表检索上界；与系统检索上下文的 CP 只能作方向性比较
 - GT 改写前的历史报告（2026-10-30 之前）中，5 道 HotpotQA yes/no 题的 Context Recall 会随 top_k 在 0/1 间跳变；与本文档中的新数字比较时需按新报告为准
 - Context Recall 的 v2 仍有两个边界问题：标准答案是**否定式陈述**（如“知识库没有携带宠物制度”）时，缺失上下文无法证明否定，v2 会判 0（人工 4）；GT 是**隐含否定**（“仅正式员工可享 → 实习生不可”）时，上下文只列正面条件也会判未覆盖（人工 4）。这两类在 25 条校准里分别对应 `C01` 与 `C07`。是否对否定式 GT 跳过 CR、或允许受控的否定推理，需要下一轮定义并重新校准；当前不要把 CR 0.866 当作绝对水平
+- 生成稳定性只跑了 8 题 × 3 次，且因火山额度限制临时改用阿里云 `deepseek-v4-pro-0813` 生成——该模型同时是 judge，存在自评偏差；主表 41 条仍由火山 `deepseek-v4-pro-ga` 生成，两批绝对分不可并列。结论限于“检索上下文相同时生成侧是否稳定”：8/8 题上下文一致但仅 1/8 题答案完全一致，AR 波动大于 F；CP/CR 方差为 0 是“只看上下文”的定义结果，不代表检索在所有条件下稳定。空回答的 Faithfulness 修复前按 1.0 计，现已改为失败；本批有 2 条 AR 因 judge 超时失败，未计入均值
 
 ## 安全
 

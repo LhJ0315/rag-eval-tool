@@ -33,6 +33,7 @@ HUMAN_PASS_BY_METRIC = {
     "context_recall": 4,
 }
 HUMAN_PASS_SENSITIVITY = (3, 4)
+JUDGE_THRESHOLD_SWEEP = tuple(round(0.05 * index, 2) for index in range(21))
 SHEET_SCHEMA_VERSION = 1
 
 
@@ -789,6 +790,77 @@ def _binary_agreement(pairs: list[tuple[float, int]], judge_threshold: float, hu
     }
 
 
+def _judge_threshold_sweep(
+    pairs: list[tuple[float, int]],
+    human_threshold: int,
+    thresholds: tuple[float, ...] = JUDGE_THRESHOLD_SWEEP,
+) -> dict:
+    """固定人工通过线，扫描 judge 阈值；最优值仅为样本内参考，不能直接部署。"""
+    rows = []
+    kappas = []
+    for threshold in thresholds:
+        agreement = _binary_agreement(pairs, threshold, human_threshold)
+        rows.append({"judge_threshold": threshold, **agreement})
+        if agreement.get("kappa") is not None:
+            kappas.append((threshold, agreement["kappa"]))
+
+    judge_scores = {pair[0] for pair in pairs}
+    human_labels = {1 if pair[1] >= human_threshold else 0 for pair in pairs}
+    base = {
+        "human_pass_threshold": human_threshold,
+        "n": len(pairs),
+        "judge_distinct_scores": len(judge_scores),
+        "human_pass_rate": round(sum(human_labels) / len(pairs), 4) if pairs else None,
+        "rows": rows,
+        "best_thresholds": [],
+        "best_kappa": None,
+        "current_kappa": None,
+        "current_is_best": False,
+    }
+    if not pairs:
+        return {**base, "status": "unavailable", "reason": "没有可配对样本"}
+    if len(human_labels) == 1:
+        return {
+            **base,
+            "status": "degenerate",
+            "reason": "人工判定全为同一类，所有阈值下的 Kappa 都退化，阈值扫描无法区分",
+        }
+    if len(judge_scores) == 1:
+        score = next(iter(judge_scores))
+        return {
+            **base,
+            "status": "degenerate",
+            "reason": f"judge 分数全部为 {score:.3f}，改变阈值只会在一个点上整体翻转",
+        }
+    if not kappas:
+        return {**base, "status": "unavailable", "reason": "所有阈值下 Kappa 均不可估"}
+
+    best_kappa = max(value for _, value in kappas)
+    if best_kappa <= 0:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": f"样本内最优 Kappa 为 {best_kappa:.3f}，不优于随机一致",
+            "best_kappa": round(best_kappa, 4),
+        }
+    best = [threshold for threshold, value in kappas if abs(value - best_kappa) < 1e-9]
+    current_row = next(
+        (row for row in rows if abs(row["judge_threshold"] - JUDGE_PASS) < 1e-9), None
+    )
+    current_kappa = current_row.get("kappa") if current_row else None
+    return {
+        **base,
+        "status": "in_sample_best",
+        "reason": "样本内最优，未在独立样本上验证",
+        "best_thresholds": [round(threshold, 2) for threshold in best],
+        "best_kappa": round(best_kappa, 4),
+        "current_kappa": current_kappa,
+        "current_is_best": bool(
+            current_kappa is not None and abs(current_kappa - best_kappa) < 1e-9
+        ),
+    }
+
+
 def score_calibration(
     ratings: dict,
     calibration: dict,
@@ -821,6 +893,7 @@ def score_calibration(
         "human_pass_thresholds": thresholds,
         "metrics": {},
         "threshold_sensitivity": {},
+        "judge_threshold_sweep": {},
     }
     pairs_by_metric: dict[str, list[tuple[float, int]]] = {}
     for metric in METRICS:
@@ -875,6 +948,10 @@ def score_calibration(
             }
             for threshold in HUMAN_PASS_SENSITIVITY
         ]
+    result["judge_threshold_sweep"] = {
+        metric: _judge_threshold_sweep(pairs_by_metric[metric], thresholds[metric])
+        for metric in METRICS
+    }
     return result
 
 
@@ -960,6 +1037,70 @@ def render_calibration_markdown(result: dict) -> str:
                     note=note,
                 )
             )
+    lines.extend(
+        [
+            "",
+            "## Judge 阈值扫描",
+            "",
+            "人工通过线固定为各指标默认值，把 judge 通过阈值从 0 到 1 按 0.05 步长扫描，观察 κ 的变化。"
+            "这是**样本内**扫描：同一批样本既用来挑阈值又用来评估，结果偏乐观，只用于判断 0.6 附近的敏感度，"
+            "不能直接替换默认阈值。",
+            "",
+            "| judge 阈值 | Faithfulness κ | Answer Relevancy κ | Context Precision κ | Context Recall κ |",
+            "|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for threshold in JUDGE_THRESHOLD_SWEEP:
+        cells = []
+        for metric in METRICS:
+            rows = result["judge_threshold_sweep"][metric].get("rows") or []
+            row = next(
+                (item for item in rows if abs(item["judge_threshold"] - threshold) < 1e-9),
+                {},
+            )
+            cells.append(_format(row.get("kappa")))
+        marker = " *" if abs(threshold - JUDGE_PASS) < 1e-9 else ""
+        lines.append(f"| {threshold:.2f}{marker} | " + " | ".join(cells) + " |")
+    lines.extend(
+        [
+            "",
+            f"\\* 为当前默认阈值 {JUDGE_PASS}。",
+            "",
+            "| 指标 | 人工阈值 | n | 0.6 处 κ | 样本内最优 κ | 最优阈值（样本内） | 状态 |",
+            "|---|---:|---:|---:|---:|---|---|",
+        ]
+    )
+    status_labels = {
+        "in_sample_best": "样本内最优",
+        "degenerate": "退化",
+        "unavailable": "不可估",
+    }
+    for metric in METRICS:
+        sweep = result["judge_threshold_sweep"][metric]
+        best = sweep.get("best_thresholds") or []
+        best_text = "、".join(f"{value:.2f}" for value in best) if best else "—"
+        lines.append(
+            "| {label} | {human} | {n} | {current} | {best_kappa} | {best} | {status} |".format(
+                label=METRIC_LABELS[metric],
+                human=sweep.get("human_pass_threshold"),
+                n=sweep.get("n"),
+                current=_format(sweep.get("current_kappa")),
+                best_kappa=_format(sweep.get("best_kappa")),
+                best=best_text,
+                status=status_labels.get(sweep.get("status"), sweep.get("status") or "—"),
+            )
+        )
+    lines.append("")
+    for metric in METRICS:
+        sweep = result["judge_threshold_sweep"][metric]
+        if sweep.get("status") != "in_sample_best":
+            lines.append(f"- {METRIC_LABELS[metric]}：{sweep.get('reason', '无法给出建议')}。")
+        elif not sweep.get("current_is_best"):
+            lines.append(
+                f"- {METRIC_LABELS[metric]}：0.6 处 κ = {_format(sweep.get('current_kappa'))}，"
+                f"样本内最优 κ = {_format(sweep.get('best_kappa'))}；"
+                f"但 n = {sweep.get('n')}，且当前样本经低分富集，不能据此直接改默认阈值。"
+            )
     lines.extend(["", "## 逐指标明细", ""])
     for metric in METRICS:
         data = result["metrics"][metric]
@@ -1011,6 +1152,8 @@ def render_calibration_markdown(result: dict) -> str:
             "主表与敏感性表的差异说明 κ 对阈值敏感，不能只报一个数字。",
             "- 某一方分数/判定无方差时，Spearman 或 Kappa 不可估；报告会显式标出，不能用 0 代替。",
             "- 若 Faithfulness 的 judge 分数全部为 1.0，该指标的 Spearman 不可估，只能看一致率和假阳性样本。",
+            "- Judge 阈值扫描给出的“样本内最优”会高估一致性；没有独立校准集时，默认阈值 0.6 保持不变，"
+            "扫描结果只作为敏感性证据。",
         ]
     )
     return "\n".join(lines) + "\n"

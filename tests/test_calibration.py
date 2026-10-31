@@ -234,6 +234,54 @@ def test_score_calibration_rejects_stale_sheet():
     assert score_calibration(ratings, calibration)["metrics"]["faithfulness"]["n"] == 1
 
 
+def test_judge_threshold_sweep_finds_in_sample_range():
+    items = []
+    for index, judge_score in enumerate([0.2, 0.4, 0.8, 1.0], start=1):
+        items.append(
+            {
+                "id": f"C{index:02d}",
+                "question": f"q{index}",
+                "tags": ["normal"],
+                "judge": {
+                    metric: {"score": judge_score, "skipped": False, "reason": "ok"}
+                    for metric in METRICS
+                },
+            }
+        )
+    ratings = {
+        "items": [
+            _rating_item(item["id"], {metric: rating for metric in METRICS})
+            for item, rating in zip(items, [1, 2, 4, 5])
+        ]
+    }
+    result = score_calibration(ratings, {"metadata": {"n": 4}, "items": items})
+    sweep = result["judge_threshold_sweep"]["context_precision"]
+    assert sweep["status"] == "in_sample_best"
+    assert len(sweep["rows"]) == 21
+    assert sweep["best_kappa"] == 1.0
+    assert 0.45 in sweep["best_thresholds"]
+    assert 0.8 in sweep["best_thresholds"]
+    assert sweep["current_kappa"] == 1.0
+    assert sweep["current_is_best"] is True
+    markdown = render_calibration_markdown(result)
+    assert "Judge 阈值扫描" in markdown
+    assert "样本内最优" in markdown
+
+
+def test_judge_threshold_sweep_flags_degenerate_metrics():
+    items, ratings = _threshold_calibration()
+    result = score_calibration(ratings, {"metadata": {"n": 2}, "items": items})
+    faithfulness = result["judge_threshold_sweep"]["faithfulness"]
+    assert faithfulness["status"] == "degenerate"
+    assert "人工判定全为同一类" in faithfulness["reason"]
+    assert faithfulness["best_thresholds"] == []
+    precision = result["judge_threshold_sweep"]["context_precision"]
+    assert precision["status"] == "degenerate"
+    assert "judge 分数全部为" in precision["reason"]
+    markdown = render_calibration_markdown(result)
+    assert "退化" in markdown
+
+
 def test_score_calibration_excludes_skipped_and_flags_constant():
     items = [
         {

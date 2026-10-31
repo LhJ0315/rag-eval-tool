@@ -44,6 +44,30 @@ def load_apps(path: Path) -> dict:
     return {"base_url": config.get("base_url", "http://localhost:8080"), "apps": apps}
 
 
+def load_questions(path: Path) -> list[str]:
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def select_samples(dataset: list[dict], questions: list[str] | None) -> list[dict]:
+    if not questions:
+        return dataset
+    wanted = set(questions)
+    available = {sample["question"] for sample in dataset}
+    missing = sorted(wanted - available)
+    if missing:
+        raise ValueError(f"题目不在数据集中：{missing[:3]}（共 {len(missing)} 条）")
+    return [sample for sample in dataset if sample["question"] in wanted]
+
+
+def checkpoint_key(record: dict) -> tuple[str, int]:
+    generation = (record.get("system") or {}).get("generation", 1)
+    return record["question"], int(generation)
+
+
 async def ask(client: httpx.AsyncClient, base_url: str, app: dict, question: str, user: str) -> dict:
     payload = {
         "inputs": {},
@@ -92,21 +116,29 @@ async def ask(client: httpx.AsyncClient, base_url: str, app: dict, question: str
 
 
 async def run(args) -> int:
+    if args.generations < 1:
+        raise ValueError("--generations 必须大于等于 1")
     dataset = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
+    questions = load_questions(Path(args.questions_file)) if args.questions_file else None
+    if args.questions_file and not questions:
+        raise ValueError("--questions-file 没有有效题目")
+    dataset = select_samples(dataset, questions)
+    generations = args.generations
     config = load_apps(Path(args.apps_file))
     base_url = config["base_url"]
     apps = config["apps"]
     semaphore = asyncio.Semaphore(args.concurrency)
     checkpoint = Path(args.output).with_suffix(".jsonl")
-    completed: dict[str, dict] = {}
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    completed: dict[tuple[str, int], dict] = {}
     if args.resume and checkpoint.exists():
         for line in checkpoint.read_text(encoding="utf-8").splitlines():
             try:
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            completed[item["question"]] = item
-        logger.info("断点续跑：已完成 %d/%d 条", len(completed), len(dataset))
+            completed[checkpoint_key(item)] = item
+        logger.info("断点续跑：已完成 %d/%d 条记录", len(completed), len(dataset) * generations)
 
     started_at = datetime.now().isoformat(timespec="seconds")
     failures: list[dict] = []
@@ -114,11 +146,11 @@ async def run(args) -> int:
 
     async with httpx.AsyncClient(timeout=args.timeout) as client:
 
-        async def process(sample: dict) -> dict:
+        async def generate(sample: dict, domain: str, generation: int) -> dict:
             question = sample["question"]
-            if question in completed:
-                return completed[question]
-            domain = route_domain(sample)
+            key = (question, generation)
+            if key in completed:
+                return completed[key]
             async with semaphore:
                 try:
                     result = await ask(
@@ -126,9 +158,14 @@ async def run(args) -> int:
                         user="rageval-" + hashlib.sha1(question.encode()).hexdigest()[:12],
                     )
                 except Exception as exc:
-                    logger.error("失败：%s（%s）", question[:40], exc)
+                    logger.error("失败：%s（第 %d 次，%s）", question[:40], generation, exc)
                     async with lock:
-                        failures.append({"question": question, "domain": domain, "error": str(exc)})
+                        failures.append({
+                            "question": question,
+                            "domain": domain,
+                            "generation": generation,
+                            "error": str(exc),
+                        })
                     return {
                         "question": question,
                         "answer": "",
@@ -136,7 +173,7 @@ async def run(args) -> int:
                         "ground_truth": sample.get("ground_truth", ""),
                         "tags": list(sample.get("tags") or []),
                         "note": sample.get("note", ""),
-                        "system": {"domain": domain, "error": str(exc)},
+                        "system": {"domain": domain, "generation": generation, "error": str(exc)},
                     }
             record = {
                 "question": question,
@@ -148,6 +185,7 @@ async def run(args) -> int:
                 "system": {
                     "domain": domain,
                     "app_id": apps[domain]["app_id"],
+                    "generation": generation,
                     "message_id": result["message_id"],
                     "latency_ms": result["latency_ms"],
                     "context_count": len(result["contexts"]),
@@ -158,10 +196,19 @@ async def run(args) -> int:
             async with lock:
                 with checkpoint.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            logger.info("完成：%s", question[:40])
+            logger.info("完成：%s（第 %d/%d 次）", question[:40], generation, generations)
             return record
 
-        records = await asyncio.gather(*(process(sample) for sample in dataset))
+        async def process(sample: dict) -> list[dict]:
+            domain = route_domain(sample)
+            return list(
+                await asyncio.gather(
+                    *(generate(sample, domain, generation) for generation in range(1, generations + 1))
+                )
+            )
+
+        batches = await asyncio.gather(*(process(sample) for sample in dataset))
+        records = [record for batch in batches for record in batch]
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -171,10 +218,13 @@ async def run(args) -> int:
         "timestamp": started_at,
         "finished_at": datetime.now().isoformat(timespec="seconds"),
         "dataset": str(args.dataset),
+        "questions_file": str(args.questions_file) if args.questions_file else None,
         "base_url": base_url,
         "apps": {domain: {"app_id": app["app_id"], "dataset_id": app.get("dataset_id")}
                  for domain, app in apps.items()},
-        "samples": len(records),
+        "samples": len(dataset),
+        "records": len(records),
+        "generations": generations,
         "failures": failures,
         "empty_retrieval": sum(1 for r in records if not r["contexts"]),
         "empty_answers": sum(1 for r in records if not r["answer"]),
@@ -186,8 +236,9 @@ async def run(args) -> int:
     meta_path = output.with_suffix(".meta.json")
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    logger.info("系统输出：%s（失败 %d，空检索 %d，空回答 %d）",
-                output, len(failures), meta["empty_retrieval"], meta["empty_answers"])
+    logger.info("系统输出：%s（%d 题 × %d 次，失败 %d，空检索 %d，空回答 %d）",
+                output, len(dataset), generations, len(failures),
+                meta["empty_retrieval"], meta["empty_answers"])
     if checkpoint.exists():
         checkpoint.unlink()
     return 1 if failures else 0
@@ -197,6 +248,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="通过 Dify Chat App 生成系统回答")
     parser.add_argument("--dataset", default="data/eval_dataset.json")
     parser.add_argument("--output", default="data/system_dify_v1.json")
+    parser.add_argument("--questions-file", default=None, help="只生成文件内列出的题目（每行一条）")
+    parser.add_argument("--generations", type=int, default=1, help="每道题独立生成次数")
     parser.add_argument("--apps-file", default=str(DEFAULT_APPS_FILE))
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=300)

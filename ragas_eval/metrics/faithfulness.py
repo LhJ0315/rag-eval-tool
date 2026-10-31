@@ -18,6 +18,9 @@ class Faithfulness(BaseMetric):
     ) -> dict:
         context_text = "\n\n".join(contexts)
 
+        if not (answer or "").strip():
+            return self.failure("回答为空，无法评估忠实度")
+
         cleaned_answer, removed_sentences = filter_refusal_sentences(answer)
         if removed_sentences and not cleaned_answer.strip():
             return self.skipped(

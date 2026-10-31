@@ -29,6 +29,13 @@ def test_faithfulness_bad_shape_returns_none():
     assert result["score"] is None
 
 
+def test_faithfulness_empty_answer_is_failure_without_llm():
+    result = asyncio.run(Faithfulness(FakeLLM()).score("q", "", ["ctx"]))
+    assert result["score"] is None
+    assert not result.get("skipped")
+    assert "回答为空" in result["reason"]
+
+
 def test_context_precision_is_position_weighted():
     # 相关段落出现在第 1、3 位：(1/1 + 2/3) / 2 = 0.833
     llm = FakeLLM(chat_responses=["Relevant", "Irrelevant", "Relevant"])
