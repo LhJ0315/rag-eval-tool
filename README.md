@@ -143,7 +143,7 @@ python -m ragas_eval run --dataset data/system_dify_v1_k8hot.json \
 
 `--apps-file` 放在仓库外，内容为 `{"base_url": "http://localhost:8080", "apps": {"policy": {"api_key": "...", "app_id": "..."}, "hotpotqa": {...}}}`，API Key 不进版本库。
 
-实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、无 rerank；policy 与 hotpotqa 各一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。2026-10-31 的单次端到端跑批使用 **policy `top_k=4` + hotpotqa `top_k=8`**，旧的全量 k=4 结果保留作对照。2026-11-01 因火山方舟额度上限，生成侧临时切到阿里云 MaaS `deepseek-v4-pro-0813` 跑稳定性批次（见“生成稳定性”）；随后 hotpotqa 应用改为 `qwen3.8-flash`（policy 仍为 deepseek，2026-11-01 16:29 后 credentials 用 `compatibility_mode=extended` 关闭思考），主表仍对应火山模型。
+实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、无 rerank；policy 与 hotpotqa 各一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。2026-10-31 的单次端到端跑批使用 **policy `top_k=4` + hotpotqa `top_k=8`**，旧的全量 k=4 结果保留作对照。2026-11-01 因火山方舟额度上限，生成侧临时切到阿里云 MaaS `deepseek-v4-pro-0813` 跑稳定性批次（见“生成稳定性”）；随后 hotpotqa 应用改为 `qwen3.8-flash`（policy 仍为 deepseek；2026-11-01 曾用 `compatibility_mode=extended` 关闭思考完成对照，随后已改回 `strict`），主表仍对应火山模型。
 
 同一 judge（`deepseek-v4-pro-0813`）判分后的对比（新系统报告：`results/system_dify_v1_k8hot/eval_report_20261031_154814_final.json`；Context Recall 为 `relation-v2` 重判结果，其余指标沿用原报告）：
 
@@ -333,7 +333,7 @@ python scripts/analyze_generation_stability.py \
 - **拒答的直接原因是上下文缺少关系证据**：8 段上下文里只有第 1 段提到 `2014 S/S` 与 WINNER，且只写“专辑由 YG Entertainment 发行”，没有写“组合由 YG 成立”；另外 5 段是 Shinee、Seventeen、SF9、History、Madtown 等“由某公司成立”的干扰段。问题问 `formed by who`，正好落在缺失的关系上。
 - **模型确实在权衡这个缺口（思考开）**：直接调用 qwen 复现时，reasoning 明确写道 “It does not explicitly state that WINNER was formed by YG Entertainment... should I say I cannot find it, or infer YG Entertainment?”。Dify 正式批次（思考开）的 3 次里 2 次推断 YG、1 次拒答，直接 API 复现 4 次都推断 YG；关闭思考后变成 2 次纯拒答 + 1 次部分回答，不再推断。拒答符合 app 预提示第 2 条“上下文没有答案就明确说找不到”，是内容判断，不是超时或服务错误。
 - **长延迟来自思考 token**：Dify 的 OpenAI 兼容插件在 `strict` 兼容模式下不会发送 `enable_thinking=false`，只有 `compatibility_mode=extended` 才会发送；qwen3.8-flash 默认开启思考。思考开批次 completion 为 125–1,474（均值 656）、延迟最高 17.3 秒（均值 8.3 秒），`2014 S/S` 的拒答用了 1,474 tokens / 17.3 秒，冒烟那次 4,175 / 68.9 秒；按实测约 60–85 tok/s 计算，延迟与思考 token 成正比。
-- **已启用 `compatibility_mode=extended` 并重跑**：把该模型 credentials 的 `compatibility_mode` 设为 `extended`（`agent_thought_support` 仍为 `not_supported`）后，插件发送 `enable_thinking=false`。2026-11-01 重跑 4 题 × 3 次，completion 降到 12–37（均值 22）、延迟 1.2–2.6 秒（均值 2.0 秒）；首次更新 credentials 后的冷启动调用为 15.0 秒 / 13 tokens，之后稳定在 2 秒级。拒答没有消失（2 次纯拒答 + 1 次部分回答），说明思考只影响延迟，不改变证据判断。结果在 `results/stability/generation_stability_qwen_nothink_hotpotqa4_s3.{md,json}`；把 credentials 改回 `strict` 可恢复思考。
+- **已启用 `compatibility_mode=extended` 并重跑**：把该模型 credentials 的 `compatibility_mode` 设为 `extended`（`agent_thought_support` 仍为 `not_supported`）后，插件发送 `enable_thinking=false`。2026-11-01 重跑 4 题 × 3 次，completion 降到 12–37（均值 22）、延迟 1.2–2.6 秒（均值 2.0 秒）；首次更新 credentials 后的冷启动调用为 15.0 秒 / 13 tokens，之后稳定在 2 秒级。拒答没有消失（2 次纯拒答 + 1 次部分回答），说明思考只影响延迟，不改变证据判断。结果在 `results/stability/generation_stability_qwen_nothink_hotpotqa4_s3.{md,json}`；对照完成后 credentials 已改回 `strict`，当前为思考开。
 
 ## 人工校准
 
