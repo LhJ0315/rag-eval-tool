@@ -143,7 +143,7 @@ python -m ragas_eval run --dataset data/system_dify_v1_k8hot.json \
 
 `--apps-file` 放在仓库外，内容为 `{"base_url": "http://localhost:8080", "apps": {"policy": {"api_key": "...", "app_id": "..."}, "hotpotqa": {...}}}`，API Key 不进版本库。
 
-实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、无 rerank；policy 与 hotpotqa 各一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。2026-10-31 的单次端到端跑批使用 **policy `top_k=4` + hotpotqa `top_k=8`**，旧的全量 k=4 结果保留作对照。2026-11-01 因火山方舟额度上限，生成侧临时切到阿里云 MaaS `deepseek-v4-pro-0813` 跑稳定性批次（见“生成稳定性”）；随后 hotpotqa 应用改为 `qwen3.8-flash`（policy 仍为 deepseek），主表仍对应火山模型。
+实测环境：Dify 1.18.0 自托管（Weaviate）+ 本地 BGE-M3 embedding 服务 + `deepseek-v4-pro`（OpenAI 兼容插件），`semantic_search`、无 rerank；policy 与 hotpotqa 各一个 Chat App，预提示要求只依据检索上下文回答、无依据时明确拒答。2026-10-31 的单次端到端跑批使用 **policy `top_k=4` + hotpotqa `top_k=8`**，旧的全量 k=4 结果保留作对照。2026-11-01 因火山方舟额度上限，生成侧临时切到阿里云 MaaS `deepseek-v4-pro-0813` 跑稳定性批次（见“生成稳定性”）；随后 hotpotqa 应用改为 `qwen3.8-flash`（policy 仍为 deepseek，2026-11-01 16:29 后 credentials 用 `compatibility_mode=extended` 关闭思考），主表仍对应火山模型。
 
 同一 judge（`deepseek-v4-pro-0813`）判分后的对比（新系统报告：`results/system_dify_v1_k8hot/eval_report_20261031_154814_final.json`；Context Recall 为 `relation-v2` 重判结果，其余指标沿用原报告）：
 
@@ -304,33 +304,36 @@ python scripts/analyze_generation_stability.py \
 - 工龄题“9 年 11 个月”的三次回答是空字符串、完整句、“5天。”，AR 分别为 0 / 0.817 / 0.1；空回答是 Dify 记录 `completion_tokens=512`、恰好达到应用 `max_tokens` 上限后的真实失败，不是判分噪声。短答“5天。”再次触发 AR 对短答/非完整句的低分偏差。
 - 病假题（虚假前提）三次都是拒答，F 跳过、CP/CR 为 0；拒答文本的 AR 反而为 0.733–0.967，说明 AR 对“礼貌拒答”仍可能给高相关性，不能把 AR 当拒答检测器。
 - 本批 24 条中有 2 条 AR 因 judge 超时失败。空回答的 Faithfulness 在修复前被记为 1.0（“没有可验证的陈述”），修复后按失败处理；CP/CR 的 0 方差是定义使然，不能据此宣称检索在所有条件下稳定。结果在 `results/stability/generation_stability_aliyun_s3.{md,json}`。
-- 2026-11-01 之后 hotpotqa 应用已单独切到 `qwen3.8-flash`（policy 仍为 `deepseek-v4-pro-0813`），上表仍是切换前的双 deepseek 批次。qwen3.8-flash 默认开启思考：冒烟中 Kansas 与 Brown State 两题 3–10 秒答对，`2014 S/S` 一题思考 4,175 completion tokens、耗时约 69 秒后拒答；Dify 的 `max_tokens=512` 没有截断思考 token，后续批次需按混合模型分域解读，不能与上表混算。
+- 2026-11-01 之后 hotpotqa 应用已单独切到 `qwen3.8-flash`（policy 仍为 `deepseek-v4-pro-0813`），上表仍是切换前的双 deepseek 批次。qwen3.8-flash 默认开启思考：冒烟中 Kansas 与 Brown State 两题 3–10 秒答对，`2014 S/S` 一题思考 4,175 completion tokens、耗时约 69 秒后拒答；Dify 的 `max_tokens=512` 没有截断思考 token。该模型随后通过 `compatibility_mode=extended` 关闭思考并重跑，见下节三列对照；后续批次需按混合模型分域解读，不能与上表混算。
 
 ### qwen3.8-flash 4 题对照（2026-11-01）
 
-把 hotpotqa 切到 `qwen3.8-flash` 后，用同一批 4 道 hotpotqa 题各生成 3 次；检索上下文与上面的 deepseek 批次逐题完全一致，judge 仍为 `deepseek-v4-pro-0813`：
+把 hotpotqa 切到 `qwen3.8-flash` 后，用同一批 4 道 hotpotqa 题各生成 3 次；检索上下文与上面的 deepseek 批次逐题完全一致（跨批次 Jaccard 也是 1.000），judge 仍为 `deepseek-v4-pro-0813`。qwen 的思考模式由 Dify credentials 的 `compatibility_mode` 控制：`strict` 时默认开启思考，`extended` 时插件发送 `enable_thinking=false`。两种模式各跑了一批：
 
-| 指标（4 题 × 3 次） | deepseek-v4-pro-0813 | qwen3.8-flash |
-|---|---|---|
-| Faithfulness | 0.909（11 有效 / 1 跳过） | 1.000（11 有效 / 1 跳过） |
-| Answer Relevancy | 0.660（10 有效 / 2 超时） | 0.450（12 有效） |
-| Context Precision | 0.812 | 0.812 |
-| Context Recall (`relation-v2`) | 0.750 | 0.750 |
-| 答案完全一致 | 1/4 | 1/4 |
-| 上下文完全一致 | 4/4 | 4/4 |
+| 指标（4 题 × 3 次） | deepseek-v4-pro-0813 | qwen3.8-flash（思考开） | qwen3.8-flash（思考关） |
+|---|---|---|---|
+| Faithfulness | 0.909（11 有效 / 1 跳过） | 1.000（11 有效 / 1 跳过） | 1.000（10 有效 / 2 跳过） |
+| Answer Relevancy | 0.660（10 有效 / 2 超时） | 0.450（12 有效） | 0.817（11 有效 / 1 超时） |
+| Context Precision | 0.812 | 0.812 | 0.812 |
+| Context Recall (`relation-v2`) | 0.750 | 0.750 | 0.750 |
+| 答案完全一致 | 1/4 | 1/4 | 0/4 |
+| 上下文完全一致 | 4/4 | 4/4 | 4/4 |
 
-- 上下文逐题相同，所以 CP/CR 相同；差异只在生成侧。qwen 的答案平均相似度 0.563，deepseek 为 0.734（deepseek 的三次答案更稳定，2014 S/S 除外）。
-- qwen 的 F 1.000 不是“更忠实”：`2014 S/S` 两次只答 “YG Entertainment”，judge 因该实体在上下文出现而判支持；deepseek 的完整句 “WINNER was formed by YG Entertainment.” 因关系不被支持判 0。短答隐藏了关系断言，F 无法识别，而两者的 CR v2 都是 0。
-- qwen 的 AR 0.450 低于 deepseek 0.660，但 deepseek 有 2 次 AR 超时未计入均值；逐题看，qwen 的 Kansas 标题（0.2）、Beckham 短答 “1986 to 2013”（0.1）、Brown 短答 “9,984 inhabitants.”（0.2）都被 AR 压低，是已知短答偏差的复现，不代表答案错误。
-- 2014 S/S 的三次是 “YG Entertainment” ×2 + 一次拒答；Kansas 三次完全一致但 AR 恒为 0.2；Beckham 两次完整句 + 一次短答，AR 0.8/0.8/0.1；Brown 三种写法，AR 0.85/0.65/0.2。AR 的组内波动主要跟随答案形式，而不是 judge 随机噪声。
+- 上下文逐题相同，所以 CP/CR 三列相同；差异只在生成侧。答案平均相似度：deepseek 0.734、qwen 思考开 0.563、qwen 思考关 0.778。
+- qwen 的 F 1.000 不是“更忠实”：`2014 S/S` 思考开时两次只答 “YG Entertainment”，judge 因该实体在上下文出现而判支持；deepseek 的完整句 “WINNER was formed by YG Entertainment.” 因关系不被支持判 0。短答隐藏了关系断言，F 无法识别，而三列的 CR v2 都是 0。
+- qwen 思考开的 AR 0.450 低于 deepseek 0.660，但 deepseek 有 2 次 AR 超时未计入均值；逐题看，Kansas 标题（0.2）、Beckham 短答 “1986 to 2013”（0.1）、Brown 短答 “9,984 inhabitants.”（0.2）都被 AR 压低，是已知短答偏差的复现，不代表答案错误。
+- 2014 S/S（思考开）三次是 “YG Entertainment” ×2 + 一次拒答；Kansas 三次完全一致但 AR 恒为 0.2；Beckham 两次完整句 + 一次短答，AR 0.8/0.8/0.1；Brown 三种写法，AR 0.85/0.65/0.2。AR 的组内波动主要跟随答案形式，而不是 judge 随机噪声。
+- **关闭思考后 AR 升到 0.817，是答案形式变化，不是答案变好**：所有回答都变成完整句（Kansas 1.0、Beckham 0.83、Brown 0.67），而思考开时对应的短答只有 0.2 左右；`2014 S/S` 的拒答句甚至得到 0.833 / 0.967，超过思考开时 “YG Entertainment” 的 AR。AR 奖励与问题共享词汇的完整句，不能当作正确性或拒答质量的证据。
+- 思考关的答案完全一致 0/4、相似度 0.778：Kansas 在 “The fight song is …” 与 “is called …” 之间变化，Beckham 在 “Sir Alex Ferguson” 与 “Alex Ferguson” 间变化，Brown 三种句式；语义相同，只是措辞不同。思考开的 1/4 完全一致也不代表更稳定。
+- 关闭思考后 `2014 S/S` 仍然没有关系证据：三次是 2 次纯拒答 + 1 次“上下文只说专辑由 YG 发行”的部分回答，CR v2 全为 0。关闭思考去掉的是长 deliberation，不是证据缺口，反而更保守，没有推断出 “YG formed WINNER”。
 
 ### 为什么 `2014 S/S` 会长时间思考后拒答
 
 - **不是 HTTP 超时**：4 题 × 3 次全部返回 200，Dify `messages.status` 全为 `normal`，runner 失败数为 0，本批最大延迟 17.3 秒；冒烟那次 68.9 秒也是 200 正常完成。
 - **拒答的直接原因是上下文缺少关系证据**：8 段上下文里只有第 1 段提到 `2014 S/S` 与 WINNER，且只写“专辑由 YG Entertainment 发行”，没有写“组合由 YG 成立”；另外 5 段是 Shinee、Seventeen、SF9、History、Madtown 等“由某公司成立”的干扰段。问题问 `formed by who`，正好落在缺失的关系上。
-- **模型确实在权衡这个缺口**：直接调用 qwen 复现时，reasoning 明确写道 “It does not explicitly state that WINNER was formed by YG Entertainment... should I say I cannot find it, or infer YG Entertainment?”。Dify 正式批次的 3 次里 2 次推断 YG、1 次拒答，直接 API 复现 4 次都推断 YG；拒答符合 app 预提示第 2 条“上下文没有答案就明确说找不到”，是内容判断，不是超时或服务错误。
-- **长延迟来自思考 token**：Dify 的 OpenAI 兼容插件在 `strict` 兼容模式下不会发送 `enable_thinking=false`，只有 `compatibility_mode=extended` 才会发送；qwen3.8-flash 默认开启思考。`2014 S/S` 的拒答用了 1,474 completion tokens / 17.3 秒，冒烟那次 4,175 / 68.9 秒；按实测约 60–85 tok/s 计算，延迟与思考 token 成正比。
-- **可选修复**：把该模型 credentials 的 `compatibility_mode` 设为 `extended`（`agent_thought_support` 仍为 `not_supported`），插件会发送 `enable_thinking=false`。直连测试 200、无 reasoning、2.4 秒返回；启用后生成行为会变，需要重跑本批才能与上表比较。
+- **模型确实在权衡这个缺口（思考开）**：直接调用 qwen 复现时，reasoning 明确写道 “It does not explicitly state that WINNER was formed by YG Entertainment... should I say I cannot find it, or infer YG Entertainment?”。Dify 正式批次（思考开）的 3 次里 2 次推断 YG、1 次拒答，直接 API 复现 4 次都推断 YG；关闭思考后变成 2 次纯拒答 + 1 次部分回答，不再推断。拒答符合 app 预提示第 2 条“上下文没有答案就明确说找不到”，是内容判断，不是超时或服务错误。
+- **长延迟来自思考 token**：Dify 的 OpenAI 兼容插件在 `strict` 兼容模式下不会发送 `enable_thinking=false`，只有 `compatibility_mode=extended` 才会发送；qwen3.8-flash 默认开启思考。思考开批次 completion 为 125–1,474（均值 656）、延迟最高 17.3 秒（均值 8.3 秒），`2014 S/S` 的拒答用了 1,474 tokens / 17.3 秒，冒烟那次 4,175 / 68.9 秒；按实测约 60–85 tok/s 计算，延迟与思考 token 成正比。
+- **已启用 `compatibility_mode=extended` 并重跑**：把该模型 credentials 的 `compatibility_mode` 设为 `extended`（`agent_thought_support` 仍为 `not_supported`）后，插件发送 `enable_thinking=false`。2026-11-01 重跑 4 题 × 3 次，completion 降到 12–37（均值 22）、延迟 1.2–2.6 秒（均值 2.0 秒）；首次更新 credentials 后的冷启动调用为 15.0 秒 / 13 tokens，之后稳定在 2 秒级。拒答没有消失（2 次纯拒答 + 1 次部分回答），说明思考只影响延迟，不改变证据判断。结果在 `results/stability/generation_stability_qwen_nothink_hotpotqa4_s3.{md,json}`；把 credentials 改回 `strict` 可恢复思考。
 
 ## 人工校准
 
